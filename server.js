@@ -39,6 +39,55 @@ async function getWorldValue(id, fallback) {
   return doc ? doc.value : fallback;
 }
 
+// ─── BOSSES — never actually implemented server-side before (the client's syncBosses()/
+// fightBoss() online paths were hitting a 404 the whole time). Each boss gets its own key in
+// a shared 'bosses' world document (same atomic-per-key pattern as land/shops), so hits on
+// different bosses can never collide. A defeated boss respawns on its own after 10 minutes —
+// checked lazily on the next read/write (same "catch up whenever someone asks" style as the
+// stocks tick above) rather than a server-side timer, since Render's free tier can sleep.
+const BOSS_RESPAWN_SEC = 600;
+function reviveIfDue(b, now) {
+  if (!b.alive && b.respawnAt && now >= b.respawnAt) {
+    b.alive = true;
+    b.maxHp = Math.round((b.baseMaxHp || b.maxHp) * (1 + (b.level || 0) * 0.2));
+    b.hp = b.maxHp;
+  }
+  return b;
+}
+async function getBosses() {
+  const doc = await worldCol.findOne({ _id: 'bosses' });
+  const bosses = (doc && doc.value) || {};
+  const now = nowSec();
+  let changed = false;
+  Object.keys(bosses).forEach(name => {
+    const before = bosses[name].alive;
+    reviveIfDue(bosses[name], now);
+    if (bosses[name].alive !== before) changed = true;
+  });
+  if (changed) await worldCol.updateOne({ _id: 'bosses' }, { $set: { value: bosses } }, { upsert: true });
+  return bosses;
+}
+async function hitBoss(name, baseMaxHp, damage) {
+  const doc = await worldCol.findOne({ _id: 'bosses' });
+  const bosses = (doc && doc.value) || {};
+  let b = bosses[name];
+  if (!b) b = { hp: baseMaxHp, maxHp: baseMaxHp, baseMaxHp, alive: true, level: 0, defeats: 0, respawnAt: 0 };
+  reviveIfDue(b, nowSec());
+  let justDefeated = false;
+  if (b.alive) {
+    b.hp = Math.max(0, b.hp - damage);
+    if (b.hp <= 0) {
+      b.alive = false;
+      b.defeats = (b.defeats || 0) + 1;
+      b.level = (b.level || 0) + 1;
+      b.respawnAt = nowSec() + BOSS_RESPAWN_SEC;
+      justDefeated = true;
+    }
+  }
+  await worldCol.updateOne({ _id: 'bosses' }, { $set: { [`value.${name}`]: b } }, { upsert: true });
+  return { ...b, justDefeated };
+}
+
 // ─── STOCKS — same lazy "catch up on request" tick as before, now read-modify-write against
 // its own small document instead of the old shared blob. ────────────────────────────────────
 const STOCK_SYMBOLS = ['CUBY', 'EXPL', 'ROBO', 'SNAK', 'CARZ', 'GAME'];
@@ -177,6 +226,14 @@ const server = http.createServer(async (req, res) => {
     }
 
     if (p === '/api/stocks' && method === 'GET') return sendJson(res, await getCurrentStockPrices());
+
+    if (p === '/api/bosses' && method === 'GET') return sendJson(res, await getBosses());
+    if (p === '/api/bosses/hit' && method === 'POST') {
+      const b = await readBody(req);
+      if (!b || !b.name || !b.maxHp || b.damage === undefined) return sendJson(res, { ok: false }, 400);
+      const result = await hitBoss(b.name, b.maxHp, b.damage);
+      return sendJson(res, result);
+    }
 
     if (p === '/api/territories' && method === 'GET') return sendJson(res, await getWorldValue('territories', {}));
     if (p === '/api/territories/hit' && method === 'POST') {
