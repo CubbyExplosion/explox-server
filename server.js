@@ -1,44 +1,53 @@
 // Explox shared-account server — Node.js port of Explox-Server.ps1, meant to run
-// permanently on a real VPS instead of a family PC + temporary tunnel. Same API,
-// same behavior, same one-JSON-file persistence model (a real VPS has its own
-// disk, so no external database is needed). Built with ONLY Node's built-in
-// modules — no npm install step, nothing to go wrong on a fresh server.
+// permanently on a real host instead of a family PC + temporary tunnel. Same API,
+// same behavior — persistence now lives in MongoDB Atlas (a free, real database)
+// instead of a local JSON file, since a host like Render doesn't keep local disk
+// contents around between restarts/deploys.
 const http = require('http');
-const fs = require('fs');
-const path = require('path');
 const url = require('url');
+const { MongoClient } = require('mongodb');
 
 const PORT = process.env.PORT || 4501;
-const DB_PATH = path.join(__dirname, 'data', 'db.json');
+const MONGODB_URI = process.env.MONGODB_URI;
+const MONGODB_DB = process.env.MONGODB_DB || 'explox';
 
-function loadDb() {
-  if (fs.existsSync(DB_PATH)) {
-    const raw = fs.readFileSync(DB_PATH, 'utf8').trim();
-    if (raw.length > 0) return JSON.parse(raw);
+if (!MONGODB_URI) {
+  console.error('Missing MONGODB_URI environment variable — set it in Render (or your host) to your Atlas connection string.');
+  process.exit(1);
+}
+
+let db; // in-memory mirror of the one persisted document
+let stateCollection;
+
+function defaultDb() {
+  return { users: [], pw: {}, data: {}, land: {}, shops: {}, stocks: { lastTick: 0, prices: {} }, territories: {} };
+}
+
+async function loadDb() {
+  const existing = await stateCollection.findOne({ _id: 'main' });
+  if (existing) {
+    delete existing._id;
+    return existing;
   }
-  return { users: [], pw: {}, data: {}, land: {}, shops: {}, stocks: { lastTick: 0, prices: {} } };
-}
-function saveDb() {
-  fs.mkdirSync(path.dirname(DB_PATH), { recursive: true });
-  fs.writeFileSync(DB_PATH, JSON.stringify(db, null, 2), 'utf8');
+  const fresh = defaultDb();
+  await stateCollection.insertOne({ _id: 'main', ...fresh });
+  return fresh;
 }
 
-const db = loadDb();
-if (!db.land) db.land = {};
-if (!db.shops) db.shops = {};
-if (!db.stocks) db.stocks = { lastTick: 0, prices: {} };
-if (!db.territories) db.territories = {};
+async function saveDb() {
+  await stateCollection.replaceOne({ _id: 'main' }, { _id: 'main', ...db }, { upsert: true });
+}
 
 // ─── STOCKS — same lazy "catch up on request" tick as the PowerShell version ──
 const STOCK_SYMBOLS = ['CUBY', 'EXPL', 'ROBO', 'SNAK', 'CARZ', 'GAME'];
 const STOCK_START_PRICES = { CUBY: 100, EXPL: 250, ROBO: 50, SNAK: 20, CARZ: 400, GAME: 150 };
 const STOCK_TICK_SECONDS = 8;
 function nowSec() { return Math.floor(Date.now() / 1000); }
-function getCurrentStockPrices() {
+async function getCurrentStockPrices() {
   if (db.stocks.lastTick === 0) {
     STOCK_SYMBOLS.forEach(sym => { db.stocks.prices[sym] = STOCK_START_PRICES[sym]; });
     db.stocks.lastTick = nowSec();
-    saveDb();
+    await saveDb();
   }
   const ticks = Math.floor((nowSec() - db.stocks.lastTick) / STOCK_TICK_SECONDS);
   if (ticks > 0) {
@@ -51,7 +60,7 @@ function getCurrentStockPrices() {
       db.stocks.prices[sym] = Math.max(0.5, Math.round(p * 100) / 100);
     });
     db.stocks.lastTick += ticks * STOCK_TICK_SECONDS;
-    saveDb();
+    await saveDb();
   }
   return db.stocks.prices;
 }
@@ -169,7 +178,7 @@ const server = http.createServer(async (req, res) => {
       return sendJson(res, currentEvent);
     }
 
-    if (p === '/api/stocks' && method === 'GET') return sendJson(res, getCurrentStockPrices());
+    if (p === '/api/stocks' && method === 'GET') return sendJson(res, await getCurrentStockPrices());
 
     if (p === '/api/territories' && method === 'GET') return sendJson(res, db.territories);
     // A real kill at a territory - increments its kill count, captures it for real
@@ -185,7 +194,7 @@ const server = http.createServer(async (req, res) => {
       t.kills += 1;
       let justCaptured = false;
       if (t.kills >= b.threshold) { t.captured = true; t.capturedBy = b.killerName; justCaptured = true; }
-      saveDb();
+      await saveDb();
       return sendJson(res, { ok: true, captured: t.captured, kills: t.kills, justCaptured });
     }
 
@@ -194,7 +203,7 @@ const server = http.createServer(async (req, res) => {
       const b = await readBody(req);
       if (!b || !b.lotId) return sendJson(res, { ok: false }, 400);
       if (b.owner) db.land[b.lotId] = b.owner; else delete db.land[b.lotId];
-      saveDb();
+      await saveDb();
       return sendJson(res, { ok: true });
     }
 
@@ -203,7 +212,7 @@ const server = http.createServer(async (req, res) => {
       const b = await readBody(req);
       if (!b || !b.owner) return sendJson(res, { ok: false }, 400);
       db.shops[b.owner] = b;
-      saveDb();
+      await saveDb();
       return sendJson(res, { ok: true });
     }
 
@@ -221,7 +230,7 @@ const server = http.createServer(async (req, res) => {
       if (db.users.includes(b.name)) return sendJson(res, { ok: false, error: 'taken' }, 409);
       db.users.push(b.name);
       db.pw[b.name] = b.pw;
-      saveDb();
+      await saveDb();
       return sendJson(res, { ok: true });
     }
 
@@ -241,14 +250,14 @@ const server = http.createServer(async (req, res) => {
         const b = await readBody(req);
         db.data[name] = b;
         if (!db.users.includes(name)) db.users.push(name);
-        saveDb();
+        await saveDb();
         return sendJson(res, { ok: true });
       }
       if (method === 'DELETE') {
         db.users = db.users.filter(u => u !== name);
         delete db.pw[name];
         delete db.data[name];
-        saveDb();
+        await saveDb();
         return sendJson(res, { ok: true });
       }
     }
@@ -259,6 +268,22 @@ const server = http.createServer(async (req, res) => {
   }
 });
 
-server.listen(PORT, () => {
-  console.log(`Explox server listening on http://0.0.0.0:${PORT}`);
+async function start() {
+  const client = new MongoClient(MONGODB_URI);
+  await client.connect();
+  stateCollection = client.db(MONGODB_DB).collection('state');
+  db = await loadDb();
+  if (!db.land) db.land = {};
+  if (!db.shops) db.shops = {};
+  if (!db.stocks) db.stocks = { lastTick: 0, prices: {} };
+  if (!db.territories) db.territories = {};
+
+  server.listen(PORT, () => {
+    console.log(`Explox server listening on http://0.0.0.0:${PORT}, connected to MongoDB`);
+  });
+}
+
+start().catch(err => {
+  console.error('Failed to start server:', err);
+  process.exit(1);
 });
