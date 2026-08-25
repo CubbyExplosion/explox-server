@@ -68,23 +68,55 @@ async function getBosses() {
   return bosses;
 }
 async function hitBoss(name, baseMaxHp, damage) {
-  const doc = await worldCol.findOne({ _id: 'bosses' });
-  const bosses = (doc && doc.value) || {};
-  let b = bosses[name];
-  if (!b) b = { hp: baseMaxHp, maxHp: baseMaxHp, baseMaxHp, alive: true, level: 0, defeats: 0, respawnAt: 0 };
-  reviveIfDue(b, nowSec());
-  let justDefeated = false;
-  if (b.alive) {
-    b.hp = Math.max(0, b.hp - damage);
-    if (b.hp <= 0) {
-      b.alive = false;
-      b.defeats = (b.defeats || 0) + 1;
-      b.level = (b.level || 0) + 1;
-      b.respawnAt = nowSec() + BOSS_RESPAWN_SEC;
-      justDefeated = true;
-    }
+  const now = nowSec();
+  // Make sure the boss key exists before anyone tries to $inc into it (first hit ever).
+  await worldCol.updateOne(
+    { _id: 'bosses', [`value.${name}`]: { $exists: false } },
+    { $set: { [`value.${name}`]: { hp: baseMaxHp, maxHp: baseMaxHp, baseMaxHp, alive: true, level: 0, defeats: 0, respawnAt: 0 } } },
+    { upsert: true }
+  );
+  // Revive-if-due is a plain overwrite (not a delta), so it's safe to run unguarded even if a
+  // few concurrent requests all do it at once — they just write the same values.
+  const preDoc = await worldCol.findOne({ _id: 'bosses' });
+  const pre = preDoc && preDoc.value && preDoc.value[name];
+  if (pre && !pre.alive && pre.respawnAt && now >= pre.respawnAt) {
+    const revivedMaxHp = Math.round((pre.baseMaxHp || pre.maxHp) * (1 + (pre.level || 0) * 0.2));
+    await worldCol.updateOne({ _id: 'bosses' }, { $set: {
+      [`value.${name}.alive`]: true, [`value.${name}.maxHp`]: revivedMaxHp, [`value.${name}.hp`]: revivedMaxHp
+    } });
   }
-  await worldCol.updateOne({ _id: 'bosses' }, { $set: { [`value.${name}`]: b } }, { upsert: true });
+  // Real bug fixed here: this used to be a findOne-then-updateOne read-modify-write, so two hits
+  // landing close together (fast swings, plus a buddy/kid companion attacking on their own timer)
+  // could both read the same HP before either write committed — the second write would silently
+  // clobber the first, losing that hit entirely. Swapped for an atomic $inc so every hit that
+  // reaches the server actually lands, no matter how many arrive at once.
+  const hitRes = await worldCol.findOneAndUpdate(
+    { _id: 'bosses', [`value.${name}.alive`]: true },
+    { $inc: { [`value.${name}.hp`]: -damage } },
+    { returnDocument: 'after' }
+  );
+  const hitDoc = hitRes && (hitRes.value || hitRes);
+  let b = hitDoc && hitDoc.value && hitDoc.value[name];
+  if (!b) {
+    // Wasn't alive at the moment this hit landed (someone else's concurrent hit just defeated
+    // it) — just report its current state, no damage to apply.
+    const cur = await worldCol.findOne({ _id: 'bosses' });
+    return { ...cur.value[name], justDefeated: false };
+  }
+  let justDefeated = false;
+  if (b.hp <= 0) {
+    // Guarded so that if several concurrent hits all cross zero, only the first one to match
+    // (alive still true) actually flips it to defeated — the rest fail the filter and no-op.
+    const defeatRes = await worldCol.findOneAndUpdate(
+      { _id: 'bosses', [`value.${name}.alive`]: true, [`value.${name}.hp`]: { $lte: 0 } },
+      { $set: { [`value.${name}.alive`]: false, [`value.${name}.respawnAt`]: now + BOSS_RESPAWN_SEC },
+        $inc: { [`value.${name}.defeats`]: 1, [`value.${name}.level`]: 1 } },
+      { returnDocument: 'after' }
+    );
+    const defeatDoc = defeatRes && (defeatRes.value || defeatRes);
+    const defeated = defeatDoc && defeatDoc.value && defeatDoc.value[name];
+    if (defeated) { justDefeated = true; b = defeated; }
+  }
   return { ...b, justDefeated };
 }
 
