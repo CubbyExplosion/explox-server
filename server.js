@@ -120,6 +120,53 @@ async function hitBoss(name, baseMaxHp, damage) {
   return { ...b, justDefeated };
 }
 
+// ─── LEADERBOARD — for the Records tab: "who has the most" across every real account, not
+// just your own personal peak. Same field names saveCurrentUser() in game.js writes into each
+// user's `data` document. Scale here is tiny (a handful of real accounts), so a plain scan on
+// every request is fine — no caching, same tradeoff listUsers() above already makes. ──────────
+const LEADERBOARD_STATS = [
+  { key: 'peakSip',              extract: d => Math.max(d.peakSip || 0, d.sip || 0) },
+  { key: 'peakElite',            extract: d => Math.max(d.peakElite || 0, d.eliteCoins || 0) },
+  { key: 'eliteLevel',           extract: d => d.eliteLevel || 0 },
+  { key: 'totalBossesDefeated',  extract: d => d.totalBossesDefeated || 0 },
+  { key: 'totalQuestsCompleted', extract: d => d.totalQuestsCompleted || 0 },
+  { key: 'playTimeSeconds',      extract: d => d.playTimeSeconds || 0 },
+  { key: 'ownedWeapons',         extract: d => (d.ownedWeapons || []).length },
+  { key: 'lifetimeRobotKills',   extract: d => d.lifetimeRobotKills || 0 },
+  { key: 'lifetimeRogueKills',   extract: d => d.lifetimeRogueKills || 0 },
+  { key: 'lifetimeWarHits',      extract: d => d.lifetimeWarHits || 0 },
+  { key: 'killerDefeats',        extract: d => d.killerDefeats || 0 },
+  { key: 'ffaKills',             extract: d => d.ffaKills || 0 },
+  { key: 'ownedCars',            extract: d => (d.ownedCars || []).length },
+  { key: 'ownedComputers',       extract: d => (d.ownedComputers || []).length },
+  { key: 'ownedFurniture',       extract: d => (d.ownedFurniture || []).length },
+  { key: 'ownedSkins',           extract: d => (d.ownedSkins || []).length },
+  { key: 'ownedArmor',           extract: d => (d.ownedArmor || []).length },
+  { key: 'ownedItems',           extract: d => (d.ownedItems || []).length },
+  { key: 'friends',              extract: d => (d.friends || []).length },
+  { key: 'children',             extract: d => (d.children || []).length },
+  { key: 'ownedStaff',           extract: d => (d.ownedStaff || []).length },
+  { key: 'myUploads',            extract: d => (d.myUploads || []).length },
+  { key: 'mySubscribers',        extract: d => d.mySubscribers || 0 },
+  { key: 'ownedLand',            extract: d => (d.ownedLand || []).length },
+  { key: 'buildings',            extract: d => Object.values(d.plotBuildings || {}).reduce((s, arr) => s + (arr ? arr.length : 0), 0) },
+  { key: 'storeSalesCount',      extract: d => d.storeSalesCount || 0 },
+  { key: 'installedApps',        extract: d => (d.installedApps || []).length },
+];
+async function getLeaderboard() {
+  const docs = await usersCol.find({}, { projection: { _id: 1, data: 1 } }).toArray();
+  const result = {};
+  LEADERBOARD_STATS.forEach(stat => {
+    let best = null;
+    for (const doc of docs) {
+      const value = stat.extract(doc.data || {});
+      if (value > 0 && (!best || value > best.value)) best = { holder: doc._id, value };
+    }
+    result[stat.key] = best || { holder: null, value: 0 };
+  });
+  return result;
+}
+
 // ─── STOCKS — same lazy "catch up on request" tick as before, now read-modify-write against
 // its own small document instead of the old shared blob. ────────────────────────────────────
 const STOCK_SYMBOLS = ['CUBY', 'EXPL', 'ROBO', 'SNAK', 'CARZ', 'GAME'];
@@ -305,6 +352,7 @@ const server = http.createServer(async (req, res) => {
     }
 
     if (p === '/api/users' && method === 'GET') return sendJson(res, await listUsers());
+    if (p === '/api/leaderboard' && method === 'GET') return sendJson(res, await getLeaderboard());
 
     if (p === '/api/signup' && method === 'POST') {
       const b = await readBody(req);
