@@ -130,6 +130,7 @@ const LEADERBOARD_STATS = [
   { key: 'eliteLevel',           extract: d => d.eliteLevel || 0 },
   { key: 'totalBossesDefeated',  extract: d => d.totalBossesDefeated || 0 },
   { key: 'totalQuestsCompleted', extract: d => d.totalQuestsCompleted || 0 },
+  { key: 'totalContractsCompleted', extract: d => d.totalContractsCompleted || 0 },
   { key: 'playTimeSeconds',      extract: d => d.playTimeSeconds || 0 },
   { key: 'ownedWeapons',         extract: d => (d.ownedWeapons || []).length },
   { key: 'lifetimeRobotKills',   extract: d => d.lifetimeRobotKills || 0 },
