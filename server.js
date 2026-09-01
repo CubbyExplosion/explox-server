@@ -208,6 +208,9 @@ const minigameState = {};  // name -> {game, data, lastSeen}
 const MINIGAME_TIMEOUT_SEC = 8;
 const mailbox = {};        // name -> [{type, from, data}]
 let currentEvent = null;   // {type, startedBy, startedAt, endsAt, data}
+const chatMessages = [];   // [{from, text, ts}] — a real shared global chat, same ephemeral reasoning as above
+const CHAT_HISTORY_MAX = 100; // caps memory growth on a long-running server; old messages just fall off the end
+const CHAT_TEXT_MAX = 200;
 
 function pruneStale(obj, timeoutSec) {
   const now = nowSec();
@@ -303,6 +306,20 @@ const server = http.createServer(async (req, res) => {
     if (p === '/api/event' && method === 'GET') {
       if (currentEvent && currentEvent.endsAt <= nowSec()) currentEvent = null;
       return sendJson(res, currentEvent);
+    }
+
+    if (p === '/api/chat' && method === 'POST') {
+      const b = await readBody(req);
+      if (!b || !b.from || !b.text) return sendJson(res, { ok: false }, 400);
+      chatMessages.push({ from: b.from, text: String(b.text).slice(0, CHAT_TEXT_MAX), ts: Date.now() });
+      if (chatMessages.length > CHAT_HISTORY_MAX) chatMessages.splice(0, chatMessages.length - CHAT_HISTORY_MAX);
+      return sendJson(res, { ok: true });
+    }
+    if (p === '/api/chat' && method === 'GET') {
+      // `since` lets a client only ask for what it hasn't seen yet (its own last-seen timestamp)
+      // instead of re-downloading the whole history every poll.
+      const since = Number(q.since) || 0;
+      return sendJson(res, chatMessages.filter(m => m.ts > since));
     }
 
     if (p === '/api/stocks' && method === 'GET') return sendJson(res, await getCurrentStockPrices());
