@@ -27,8 +27,18 @@ let usersCol, worldCol;
 // Every read/write here only ever touches that one document, never anyone else's. ──────────
 async function getUserDoc(name) { return await usersCol.findOne({ _id: name }); }
 async function listUsers() {
-  const docs = await usersCol.find({}, { projection: { _id: 1, 'data.sip': 1 } }).toArray();
-  return docs.map(d => ({ name: d._id, sip: (d.data && d.data.sip !== undefined) ? d.data.sip : 0 }));
+  const docs = await usersCol.find({}, { projection: { _id: 1, 'data.sip': 1, signupAt: 1, lastPlayedAt: 1 } }).toArray();
+  return docs.map(d => ({
+    name: d._id,
+    sip: (d.data && d.data.sip !== undefined) ? d.data.sip : 0,
+    // User's own ask: "how many people are there in the game this week" — real signup/last-played
+    // timestamps (added below, both at /api/signup and the upsert-on-save path) so the client can
+    // compute a real "new this week"/"active this week" stat instead of just a running total.
+    // Older accounts predate this field entirely — null, not a fabricated date, so the client can
+    // tell "we don't know" apart from "signed up a long time ago".
+    signupAt: d.signupAt || null,
+    lastPlayedAt: d.lastPlayedAt || null,
+  }));
 }
 
 // ─── SHARED WORLD STATE — land/shops/territories are each their own small document, updated
@@ -376,7 +386,8 @@ const server = http.createServer(async (req, res) => {
       const b = await readBody(req);
       if (!b || !b.name || !b.pw) return sendJson(res, { ok: false, error: 'missing name/pw' }, 400);
       try {
-        await usersCol.insertOne({ _id: b.name, pw: b.pw, data: {} });
+        const now = Date.now();
+        await usersCol.insertOne({ _id: b.name, pw: b.pw, data: {}, signupAt: now, lastPlayedAt: now });
       } catch (e) {
         if (e && e.code === 11000) return sendJson(res, { ok: false, error: 'taken' }, 409); // unique _id already exists — race-safe
         throw e;
@@ -401,7 +412,15 @@ const server = http.createServer(async (req, res) => {
         const b = await readBody(req);
         // upsert: a client saving before its own signup call landed (or a companion-hit style
         // partial write) still ends up with a real document, same as the old array-push did.
-        await usersCol.updateOne({ _id: name }, { $set: { data: b }, $setOnInsert: { pw: null } }, { upsert: true });
+        // lastPlayedAt updates on every real save; signupAt only gets set if this save is what
+        // actually CREATES the document (an account that reached here without ever calling
+        // /api/signup) — an existing account's real original signupAt is never overwritten.
+        const now = Date.now();
+        await usersCol.updateOne(
+          { _id: name },
+          { $set: { data: b, lastPlayedAt: now }, $setOnInsert: { pw: null, signupAt: now } },
+          { upsert: true }
+        );
         return sendJson(res, { ok: true });
       }
       if (method === 'DELETE') {
