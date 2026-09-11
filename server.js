@@ -21,7 +21,7 @@ if (!MONGODB_URI) {
   process.exit(1);
 }
 
-let usersCol, worldCol;
+let usersCol, worldCol, animatorCol;
 
 // ─── PER-PLAYER ACCOUNT DATA — one Mongo document per username, _id = the username itself.
 // Every read/write here only ever touches that one document, never anyone else's. ──────────
@@ -429,6 +429,26 @@ const server = http.createServer(async (req, res) => {
       }
     }
 
+    // ─── ANIMATOR PROJECTS — its own collection, separate from the main-game `users` doc's
+    // `data` blob on purpose: the main game POSTs a full-document replace of `data` on every
+    // save, so if the Animator shared that same field, a save from one racing against a save
+    // from the other could silently wipe whichever landed second (the exact bug the per-
+    // document rewrite above was built to avoid). Keeping animator projects in their own
+    // document per user means an Animator save can never collide with a real game save. ─────
+    if (p.startsWith('/api/animator/')) {
+      const name = decodeURIComponent(p.slice('/api/animator/'.length));
+      if (method === 'GET') {
+        const doc = await animatorCol.findOne({ _id: name });
+        return sendJson(res, (doc && doc.projects) ? doc.projects : {});
+      }
+      if (method === 'POST') {
+        const b = await readBody(req);
+        if (!b || typeof b !== 'object') return sendJson(res, { ok: false }, 400);
+        await animatorCol.updateOne({ _id: name }, { $set: { projects: b, updatedAt: Date.now() } }, { upsert: true });
+        return sendJson(res, { ok: true });
+      }
+    }
+
     sendJson(res, { error: 'not found' }, 404);
   } catch (e) {
     try { sendJson(res, { error: e.message }, 500); } catch (e2) {}
@@ -441,6 +461,7 @@ async function start() {
   const dbHandle = client.db(MONGODB_DB);
   usersCol = dbHandle.collection('users');
   worldCol = dbHandle.collection('world');
+  animatorCol = dbHandle.collection('animator_projects');
   await usersCol.createIndex({ _id: 1 }); // no-op if it already exists — _id is unique by default anyway
 
   // One-time migration: the old single-document model stored everything under a "state"
