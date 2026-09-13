@@ -305,9 +305,30 @@ const minigameState = {};  // name -> {game, data, lastSeen}
 const MINIGAME_TIMEOUT_SEC = 8;
 const mailbox = {};        // name -> [{type, from, data}]
 let currentEvent = null;   // {type, startedBy, startedAt, endsAt, data}
-const chatMessages = [];   // [{from, text, ts}] — a real shared global chat, same ephemeral reasoning as above
-const CHAT_HISTORY_MAX = 100; // caps memory growth on a long-running server; old messages just fall off the end
+
+// ─── CHAT — user's own ask: messages shouldn't disappear for everyone just because Render's
+// free instance spun down from inactivity and restarted. Originally an in-memory array like the
+// ephemeral state above, but that meant a routine restart silently wiped the whole conversation
+// out from under every player, which reads as "messages disappearing" with no obvious cause.
+// Persisted the same way land/shops/stocks are (worldCol, one shared document), so it survives
+// restarts exactly like real account data does — the ONLY thing that resets it now is the
+// CHAT_HISTORY_MAX cap below trimming the oldest messages, never a server restart.
+const CHAT_HISTORY_MAX = 100; // caps storage growth on a long-running server; old messages just fall off the end
 const CHAT_TEXT_MAX = 200;
+async function addChatMessage(from, text) {
+  const msg = { from, text: String(text).slice(0, CHAT_TEXT_MAX), ts: Date.now() };
+  // $push + $slice is one atomic operation — keeps only the last CHAT_HISTORY_MAX messages with
+  // no separate read-modify-write step, so two messages landing at the same instant can't race.
+  await worldCol.updateOne(
+    { _id: 'chat' },
+    { $push: { value: { $each: [msg], $slice: -CHAT_HISTORY_MAX } } },
+    { upsert: true }
+  );
+}
+async function getChatMessages(sinceTs) {
+  const doc = await worldCol.findOne({ _id: 'chat' });
+  return ((doc && doc.value) || []).filter(m => m.ts > sinceTs);
+}
 
 function pruneStale(obj, timeoutSec) {
   const now = nowSec();
@@ -408,15 +429,14 @@ const server = http.createServer(async (req, res) => {
     if (p === '/api/chat' && method === 'POST') {
       const b = await readBody(req);
       if (!b || !b.from || !b.text) return sendJson(res, { ok: false }, 400);
-      chatMessages.push({ from: b.from, text: String(b.text).slice(0, CHAT_TEXT_MAX), ts: Date.now() });
-      if (chatMessages.length > CHAT_HISTORY_MAX) chatMessages.splice(0, chatMessages.length - CHAT_HISTORY_MAX);
+      await addChatMessage(b.from, b.text);
       return sendJson(res, { ok: true });
     }
     if (p === '/api/chat' && method === 'GET') {
       // `since` lets a client only ask for what it hasn't seen yet (its own last-seen timestamp)
       // instead of re-downloading the whole history every poll.
       const since = Number(q.since) || 0;
-      return sendJson(res, chatMessages.filter(m => m.ts > since));
+      return sendJson(res, await getChatMessages(since));
     }
 
     if (p === '/api/stocks' && method === 'GET') return sendJson(res, await getCurrentStockPrices());
