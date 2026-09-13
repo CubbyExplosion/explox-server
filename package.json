@@ -10,6 +10,7 @@
     "node": ">=18"
   },
   "dependencies": {
-    "mongodb": "^6.10.0"
+    "mongodb": "^6.10.0",
+    "stripe": "^17.4.0"
   }
 }

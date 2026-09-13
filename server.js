@@ -178,6 +178,93 @@ async function getLeaderboard() {
   return result;
 }
 
+// ─── REAL-MONEY PAYMENTS — Stripe. Every price is looked up SERVER-SIDE from the tables below
+// (never trusted from the client), so nobody can tamper with what they're charged. One-time
+// purchases (currency bundles, item unlocks, the VIP discount) use Checkout in 'payment' mode;
+// vehicle rentals use 'subscription' mode, billed weekly until cancelled — cancel anytime and it
+// just stops renewing, no separate "end rental" call needed. Grants land in a SEPARATE
+// `entitlements` field on the user document, never inside `data` — `data` gets wholesale-
+// replaced by the client's normal save (POST /api/user/:name), so writing a grant directly into
+// `data` would risk a save landing moments later and silently overwriting it, the exact race
+// this codebase already got burned by once (see the file-header comment). `entitlements` is
+// server/webhook-owned only; the client only ever reads it, it never writes it back wholesale.
+const Stripe = require('stripe');
+const STRIPE_SECRET_KEY = process.env.STRIPE_SECRET_KEY;
+const STRIPE_WEBHOOK_SECRET = process.env.STRIPE_WEBHOOK_SECRET;
+const stripe = STRIPE_SECRET_KEY ? new Stripe(STRIPE_SECRET_KEY) : null;
+
+// One-time purchases — prices mirror CURRENCY_SHOP_PACKAGES (game-alignment.js) exactly; keep
+// the two in sync if a price ever changes there. sip/elite credit directly (per the user's own
+// rule documented alongside that catalog: real money in, currency in the wallet immediately —
+// never routed through the Earnings-tab collectible-delay system real gameplay rewards use).
+const ONE_TIME_PRODUCTS = {
+  sip100:       { cents: 500,  name: '100 S.I.P.',         grant: { sip: 100 } },
+  sip500:       { cents: 800,  name: '500 S.I.P.',         grant: { sip: 500 } },
+  sip1000:      { cents: 1000, name: '1,000 S.I.P.',       grant: { sip: 1000 } },
+  sip5000:      { cents: 1500, name: '5,000 S.I.P.',       grant: { sip: 5000 } },
+  sip10000:     { cents: 2000, name: '10,000 S.I.P.',      grant: { sip: 10000 } },
+  sip25000:     { cents: 2100, name: '25,000 S.I.P.',      grant: { sip: 25000 } },
+  sip50000:     { cents: 2200, name: '50,000 S.I.P.',      grant: { sip: 50000 } },
+  sip100000:    { cents: 2500, name: '100,000 S.I.P.',     grant: { sip: 100000 } },
+  sip1000000:   { cents: 3500, name: '1,000,000 S.I.P.',   grant: { sip: 1000000 } },
+  elite100:     { cents: 500,  name: '100 Elite Coins',    grant: { elite: 100 } },
+  elite500:     { cents: 800,  name: '500 Elite Coins',    grant: { elite: 500 } },
+  elite1000:    { cents: 1000, name: '1,000 Elite Coins',  grant: { elite: 1000 } },
+  elite5000:    { cents: 1500, name: '5,000 Elite Coins',  grant: { elite: 5000 } },
+  elite25000:   { cents: 2000, name: '25,000 Elite Coins', grant: { elite: 25000 } },
+  elite50000:   { cents: 2500, name: '50,000 Elite Coins', grant: { elite: 50000 } },
+  elite100000:  { cents: 3500, name: '100,000 Elite Coins',grant: { elite: 100000 } },
+  elite1000000: { cents: 4500, name: '1,000,000 Elite Coins', grant: { elite: 1000000 } },
+  starter:      { cents: 800,  name: 'Starter Pack',       grant: { sip: 1000, elite: 100 } },
+  vip:          { cents: 2500, name: 'VIP Package',        grant: { sip: 100000, elite: 5000 } },
+  vip_discount: { cents: 500,  name: 'VIP Discount',       grant: { discountPct: 20 } },
+  mega:         { cents: 6000, name: 'Mega Bundle',        grant: { sip: 2000000, elite: 2000000 } },
+  super_tank:       { cents: 1000, name: 'Super Tank',       grant: { item: 'super_tank' } },
+  super_armor:      { cents: 1000, name: 'Super Armor',      grant: { item: 'super_armor' } },
+  super_jet:        { cents: 1500, name: 'Super Jet',        grant: { item: 'super_jet' } },
+  super_motorcycle: { cents: 800,  name: 'Super Motorcycle', grant: { item: 'super_motorcycle' } },
+  future_jet:       { cents: 199,  name: 'Future Jet',       grant: { item: 'future_jet' } },
+  super_package:    { cents: 3500, name: 'Super Package',    grant: { sip: 10000, elite: 1000, items: ['super_tank','super_jet','super_motorcycle'] } },
+};
+
+// Weekly rentals — new alongside the one-time unlocks above: cheaper, temporary access to the
+// same vehicles, billed weekly until cancelled. "Active" just means "this subscription is
+// currently live", tracked via subscriptionId + updated by the webhook below when it's created
+// or cancelled — no hand-rolled expiry timer to keep in sync with Stripe's own billing clock.
+const RENTAL_PRODUCTS = {
+  rent_super_tank:       { cents: 300, name: 'Super Tank (weekly rental)',       vehicle: 'super_tank' },
+  rent_super_jet:        { cents: 400, name: 'Super Jet (weekly rental)',        vehicle: 'super_jet' },
+  rent_super_motorcycle: { cents: 250, name: 'Super Motorcycle (weekly rental)', vehicle: 'super_motorcycle' },
+  rent_future_jet:       { cents: 350, name: 'Future Jet (weekly rental)',       vehicle: 'future_jet' },
+};
+
+async function getEntitlements(name) {
+  const doc = await usersCol.findOne({ _id: name }, { projection: { entitlements: 1 } });
+  return (doc && doc.entitlements) || { pendingGrants: [], unlockedItems: [], discountPct: 0, rentals: {} };
+}
+async function applyOneTimeGrant(name, grant) {
+  const update = { $push: { 'entitlements.pendingGrants': { sip: grant.sip || 0, elite: grant.elite || 0, ts: Date.now(), claimed: false } } };
+  if (grant.discountPct) update.$set = { 'entitlements.discountPct': grant.discountPct };
+  const items = grant.items || (grant.item ? [grant.item] : []);
+  if (items.length) update.$addToSet = { 'entitlements.unlockedItems': { $each: items } };
+  await usersCol.updateOne({ _id: name }, update, { upsert: true });
+}
+async function setRentalActive(name, vehicle, subscriptionId, active) {
+  await usersCol.updateOne(
+    { _id: name },
+    { $set: { [`entitlements.rentals.${vehicle}`]: { active, subscriptionId } } },
+    { upsert: true }
+  );
+}
+function readRawBody(req) {
+  return new Promise((resolve, reject) => {
+    const chunks = [];
+    req.on('data', c => chunks.push(c));
+    req.on('end', () => resolve(Buffer.concat(chunks)));
+    req.on('error', reject);
+  });
+}
+
 // ─── STOCKS — same lazy "catch up on request" tick as before, now read-modify-write against
 // its own small document instead of the old shared blob. ────────────────────────────────────
 const STOCK_SYMBOLS = ['CUBY', 'EXPL', 'ROBO', 'SNAK', 'CARZ', 'GAME'];
@@ -446,6 +533,84 @@ const server = http.createServer(async (req, res) => {
         if (!b || typeof b !== 'object') return sendJson(res, { ok: false }, 400);
         await animatorCol.updateOne({ _id: name }, { $set: { projects: b, updatedAt: Date.now() } }, { upsert: true });
         return sendJson(res, { ok: true });
+      }
+    }
+
+    if (p === '/api/checkout/create-session' && method === 'POST') {
+      if (!stripe) return sendJson(res, { ok: false, error: 'payments not configured yet' }, 503);
+      const b = await readBody(req);
+      if (!b || !b.name || !b.productId || !b.returnUrl) return sendJson(res, { ok: false, error: 'missing fields' }, 400);
+      const oneTime = ONE_TIME_PRODUCTS[b.productId];
+      const rental = RENTAL_PRODUCTS[b.productId];
+      if (!oneTime && !rental) return sendJson(res, { ok: false, error: 'unknown product' }, 404);
+      try {
+        const base = b.returnUrl.split('?')[0];
+        const session = await stripe.checkout.sessions.create(oneTime ? {
+          mode: 'payment',
+          line_items: [{ price_data: { currency: 'usd', product_data: { name: oneTime.name }, unit_amount: oneTime.cents }, quantity: 1 }],
+          metadata: { name: b.name, productId: b.productId },
+          success_url: base + '?stripe=success',
+          cancel_url: base + '?stripe=cancel',
+        } : {
+          mode: 'subscription',
+          line_items: [{ price_data: { currency: 'usd', product_data: { name: rental.name }, recurring: { interval: 'week' }, unit_amount: rental.cents }, quantity: 1 }],
+          subscription_data: { metadata: { name: b.name, productId: b.productId } },
+          metadata: { name: b.name, productId: b.productId },
+          success_url: base + '?stripe=success',
+          cancel_url: base + '?stripe=cancel',
+        });
+        return sendJson(res, { ok: true, url: session.url });
+      } catch (e) {
+        console.error('checkout session error:', e.message);
+        return sendJson(res, { ok: false, error: 'stripe error' }, 500);
+      }
+    }
+
+    if (p === '/api/checkout/webhook' && method === 'POST') {
+      if (!stripe || !STRIPE_WEBHOOK_SECRET) return sendJson(res, { ok: false }, 503);
+      const rawBody = await readRawBody(req);
+      let event;
+      try {
+        event = stripe.webhooks.constructEvent(rawBody, req.headers['stripe-signature'], STRIPE_WEBHOOK_SECRET);
+      } catch (e) {
+        console.error('Webhook signature verification failed:', e.message);
+        return sendJson(res, { error: 'bad signature' }, 400);
+      }
+      try {
+        if (event.type === 'checkout.session.completed') {
+          const session = event.data.object;
+          const name = session.metadata && session.metadata.name;
+          const productId = session.metadata && session.metadata.productId;
+          const oneTime = productId && ONE_TIME_PRODUCTS[productId];
+          const rental = productId && RENTAL_PRODUCTS[productId];
+          if (name && oneTime) await applyOneTimeGrant(name, oneTime.grant);
+          else if (name && rental) await setRentalActive(name, rental.vehicle, session.subscription, true);
+        } else if (event.type === 'customer.subscription.deleted') {
+          const sub = event.data.object;
+          const name = sub.metadata && sub.metadata.name;
+          const productId = sub.metadata && sub.metadata.productId;
+          const rental = productId && RENTAL_PRODUCTS[productId];
+          if (name && rental) await setRentalActive(name, rental.vehicle, sub.id, false);
+        }
+      } catch (e) {
+        console.error('Webhook handling error:', e.message);
+      }
+      return sendJson(res, { received: true });
+    }
+
+    if (p.startsWith('/api/entitlements/')) {
+      const parts = p.slice('/api/entitlements/'.length).split('/');
+      const name = decodeURIComponent(parts[0]);
+      const isClaim = parts[1] === 'claim';
+      if (method === 'GET' && !isClaim) return sendJson(res, await getEntitlements(name));
+      if (method === 'POST' && isClaim) {
+        const doc = await usersCol.findOne({ _id: name }, { projection: { entitlements: 1 } });
+        const grants = (doc && doc.entitlements && doc.entitlements.pendingGrants) || [];
+        const toClaim = grants.filter(g => !g.claimed);
+        if (toClaim.length) {
+          await usersCol.updateOne({ _id: name }, { $set: { 'entitlements.pendingGrants': grants.map(g => ({ ...g, claimed: true })) } });
+        }
+        return sendJson(res, { claimed: toClaim });
       }
     }
 
