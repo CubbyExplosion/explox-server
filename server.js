@@ -545,12 +545,16 @@ const server = http.createServer(async (req, res) => {
       if (!oneTime && !rental) return sendJson(res, { ok: false, error: 'unknown product' }, 404);
       try {
         const base = b.returnUrl.split('?')[0];
+        // managed_payments explicitly disabled — the account defaults to it, but it charges an
+        // extra 3.5% and requires a tax code on every product; the user's own choice ("self-
+        // handle" during onboarding, "i dont wanr to pY" the extra fee) was to opt out of it.
         const session = await stripe.checkout.sessions.create(oneTime ? {
           mode: 'payment',
           line_items: [{ price_data: { currency: 'usd', product_data: { name: oneTime.name }, unit_amount: oneTime.cents }, quantity: 1 }],
           metadata: { name: b.name, productId: b.productId },
           success_url: base + '?stripe=success',
           cancel_url: base + '?stripe=cancel',
+          managed_payments: { enabled: false },
         } : {
           mode: 'subscription',
           line_items: [{ price_data: { currency: 'usd', product_data: { name: rental.name }, recurring: { interval: 'week' }, unit_amount: rental.cents }, quantity: 1 }],
@@ -558,6 +562,7 @@ const server = http.createServer(async (req, res) => {
           metadata: { name: b.name, productId: b.productId },
           success_url: base + '?stripe=success',
           cancel_url: base + '?stripe=cancel',
+          managed_payments: { enabled: false },
         });
         return sendJson(res, { ok: true, url: session.url });
       } catch (e) {
