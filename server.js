@@ -314,7 +314,7 @@ let currentEvent = null;   // {type, startedBy, startedAt, endsAt, data}
 // restarts exactly like real account data does — the ONLY thing that resets it now is the
 // CHAT_HISTORY_MAX cap below trimming the oldest messages, never a server restart.
 const CHAT_HISTORY_MAX = 100; // caps storage growth on a long-running server; old messages just fall off the end
-const CHAT_TEXT_MAX = 200;
+const CHAT_TEXT_MAX = 10000; // user's own ask — raised from 200
 async function addChatMessage(from, text) {
   const msg = { from, text: String(text).slice(0, CHAT_TEXT_MAX), ts: Date.now() };
   // $push + $slice is one atomic operation — keeps only the last CHAT_HISTORY_MAX messages with
