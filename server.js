@@ -565,26 +565,33 @@ const server = http.createServer(async (req, res) => {
       if (!oneTime && !rental) return sendJson(res, { ok: false, error: 'unknown product' }, 404);
       try {
         const base = b.returnUrl.split('?')[0];
+        const lineItem = oneTime
+          ? { price_data: { currency: 'usd', product_data: { name: oneTime.name }, unit_amount: oneTime.cents }, quantity: 1 }
+          : { price_data: { currency: 'usd', product_data: { name: rental.name }, recurring: { interval: 'week' }, unit_amount: rental.cents }, quantity: 1 };
         // managed_payments explicitly disabled — the account defaults to it, but it charges an
         // extra 3.5% and requires a tax code on every product; the user's own choice ("self-
         // handle" during onboarding, "i dont wanr to pY" the extra fee) was to opt out of it.
-        const session = await stripe.checkout.sessions.create(oneTime ? {
-          mode: 'payment',
-          line_items: [{ price_data: { currency: 'usd', product_data: { name: oneTime.name }, unit_amount: oneTime.cents }, quantity: 1 }],
+        const common = {
+          mode: oneTime ? 'payment' : 'subscription',
+          line_items: [lineItem],
           metadata: { name: b.name, productId: b.productId },
-          success_url: base + '?stripe=success',
-          cancel_url: base + '?stripe=cancel',
           managed_payments: { enabled: false },
-        } : {
-          mode: 'subscription',
-          line_items: [{ price_data: { currency: 'usd', product_data: { name: rental.name }, recurring: { interval: 'week' }, unit_amount: rental.cents }, quantity: 1 }],
-          subscription_data: { metadata: { name: b.name, productId: b.productId } },
-          metadata: { name: b.name, productId: b.productId },
-          success_url: base + '?stripe=success',
-          cancel_url: base + '?stripe=cancel',
-          managed_payments: { enabled: false },
-        });
-        return sendJson(res, { ok: true, url: session.url });
+        };
+        if (!oneTime) common.subscription_data = { metadata: { name: b.name, productId: b.productId } };
+        // Embedded mode — user's own ask, using the publishable key to mount Stripe's own
+        // Checkout UI directly inside the game instead of redirecting to a separate page. Same
+        // session/webhook/entitlements plumbing underneath either way; only ui_mode and which of
+        // return_url vs success_url+cancel_url differs (embedded has one combined return_url,
+        // hosted needs both since Stripe itself does the redirecting there).
+        if (b.embedded) {
+          common.ui_mode = 'embedded';
+          common.return_url = base + '?stripe=success';
+        } else {
+          common.success_url = base + '?stripe=success';
+          common.cancel_url = base + '?stripe=cancel';
+        }
+        const session = await stripe.checkout.sessions.create(common);
+        return sendJson(res, b.embedded ? { ok: true, clientSecret: session.client_secret } : { ok: true, url: session.url });
       } catch (e) {
         console.error('checkout session error:', e.message);
         return sendJson(res, { ok: false, error: 'stripe error' }, 500);
