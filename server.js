@@ -21,7 +21,7 @@ if (!MONGODB_URI) {
   process.exit(1);
 }
 
-let usersCol, worldCol, animatorCol;
+let usersCol, worldCol, animatorCol, exgunUsersCol;
 
 // ─── PER-PLAYER ACCOUNT DATA — one Mongo document per username, _id = the username itself.
 // Every read/write here only ever touches that one document, never anyone else's. ──────────
@@ -301,6 +301,12 @@ async function getCurrentStockPrices() {
 // nothing — unlike account data, which is why THAT moved to per-user documents above. ────────
 const presence = {};       // name -> {..., lastSeen}
 const PRESENCE_TIMEOUT_SEC = 8;
+// Exgun's own presence table — deliberately separate from `presence` above (different game,
+// different account namespace) and keyed the same way, but filtered by mapId on read since a
+// player only ever needs to see the ~dozen other people on their OWN one of the 100 maps, not
+// everyone online across all of them.
+const exgunPresence = {};  // name -> {..., mapId, lastSeen}
+const EXGUN_PRESENCE_TIMEOUT_SEC = 8;
 const minigameState = {};  // name -> {game, data, lastSeen}
 const MINIGAME_TIMEOUT_SEC = 8;
 const mailbox = {};        // name -> [{type, from, data}]
@@ -556,6 +562,61 @@ const server = http.createServer(async (req, res) => {
       }
     }
 
+    // ─── EXGUN — a separate RPG, its own account namespace (own collection, own signup/login,
+    // never touches `users`/`usersCol` above) so it can never collide with a real Explox account
+    // or save. Same per-document-per-player model as the main game for the same reason (one
+    // write only ever touches one player's own document), and the same free-form
+    // POST-whatever-the-client-sends /api/*/presence pattern as Explox's own `presence` above,
+    // just in its own table and filtered by mapId (100 maps; only same-map players matter). ────
+    if (p === '/api/exgun/signup' && method === 'POST') {
+      const b = await readBody(req);
+      if (!b || !b.name || !b.pw) return sendJson(res, { ok: false, error: 'missing name/pw' }, 400);
+      try {
+        await exgunUsersCol.insertOne({ _id: b.name, pw: b.pw, data: {}, signupAt: Date.now() });
+      } catch (e) {
+        if (e && e.code === 11000) return sendJson(res, { ok: false, error: 'taken' }, 409);
+        throw e;
+      }
+      return sendJson(res, { ok: true });
+    }
+    if (p === '/api/exgun/login' && method === 'POST') {
+      const b = await readBody(req);
+      const doc = b && b.name ? await exgunUsersCol.findOne({ _id: b.name }) : null;
+      return sendJson(res, { ok: !!(doc && doc.pw === b.pw) });
+    }
+    if (p.startsWith('/api/exgun/user/')) {
+      const name = decodeURIComponent(p.slice('/api/exgun/user/'.length));
+      if (method === 'GET') {
+        const doc = await exgunUsersCol.findOne({ _id: name });
+        return (doc && doc.data) ? sendJson(res, doc.data) : sendJson(res, { error: 'not found' }, 404);
+      }
+      if (method === 'POST') {
+        const b = await readBody(req);
+        await exgunUsersCol.updateOne(
+          { _id: name },
+          { $set: { data: b, lastPlayedAt: Date.now() }, $setOnInsert: { pw: null, signupAt: Date.now() } },
+          { upsert: true }
+        );
+        return sendJson(res, { ok: true });
+      }
+      if (method === 'DELETE') {
+        await exgunUsersCol.deleteOne({ _id: name });
+        return sendJson(res, { ok: true });
+      }
+    }
+    if (p === '/api/exgun/presence' && method === 'POST') {
+      const b = await readBody(req);
+      if (!b || !b.name || !b.mapId) return sendJson(res, { ok: false }, 400);
+      exgunPresence[b.name] = Object.assign({}, b, { lastSeen: nowSec() });
+      return sendJson(res, { ok: true });
+    }
+    if (p === '/api/exgun/presence' && method === 'GET') {
+      pruneStale(exgunPresence, EXGUN_PRESENCE_TIMEOUT_SEC);
+      const exclude = q.exclude, mapId = q.mapId;
+      const list = Object.values(exgunPresence).filter(v => v.name !== exclude && (!mapId || v.mapId === mapId));
+      return sendJson(res, list);
+    }
+
     if (p === '/api/checkout/create-session' && method === 'POST') {
       if (!stripe) return sendJson(res, { ok: false, error: 'payments not configured yet' }, 503);
       const b = await readBody(req);
@@ -659,6 +720,7 @@ async function start() {
   usersCol = dbHandle.collection('users');
   worldCol = dbHandle.collection('world');
   animatorCol = dbHandle.collection('animator_projects');
+  exgunUsersCol = dbHandle.collection('exgun_users');
   await usersCol.createIndex({ _id: 1 }); // no-op if it already exists — _id is unique by default anyway
 
   // One-time migration: the old single-document model stored everything under a "state"
