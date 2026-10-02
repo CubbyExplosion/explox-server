@@ -227,6 +227,28 @@ const ONE_TIME_PRODUCTS = {
   super_package:    { cents: 3500, name: 'Super Package',    grant: { sip: 10000, elite: 1000, items: ['super_tank','super_jet','super_motorcycle'] } },
 };
 
+// Mirrors game-admin.js's own ADMIN_ACCOUNTS exactly (case-insensitive compare, same reasoning:
+// the real account is stored capitalized). Used ONLY to gate /api/checkout/create-custom-session
+// below — every other endpoint in this file already just trusts whatever name the client sends
+// (this whole server has no real login-session/token system), but that endpoint mints a Stripe
+// session for an ARBITRARY amount, so without this check anyone who found the URL could hit it
+// directly and check out for $0.01 while asking to be granted any sip/elite amount they typed in.
+const ADMIN_ACCOUNTS = ['cubby explosion', 'gurnaldst'];
+function isAdminName(name) { return ADMIN_ACCOUNTS.includes(String(name || '').trim().toLowerCase()); }
+
+// The admin NAMES above are public (they ship in the game's own client code), so a name check on
+// its own can't tell a real admin from anyone typing that name into a hand-made request. The
+// custom-session endpoint therefore ALSO needs a shared secret that only exists as a server
+// environment variable (ADMIN_CHECKOUT_SECRET, set in the host's dashboard — never in the repo or
+// the client bundle). Fails CLOSED: with no secret configured, the endpoint refuses everyone.
+const ADMIN_CHECKOUT_SECRET = process.env.ADMIN_CHECKOUT_SECRET || '';
+function isAdminRequest(b) {
+  if (!ADMIN_CHECKOUT_SECRET || !isAdminName(b.adminName) || typeof b.adminSecret !== 'string') return false;
+  const crypto = require('crypto');
+  const a = Buffer.from(b.adminSecret), s = Buffer.from(ADMIN_CHECKOUT_SECRET);
+  return a.length === s.length && crypto.timingSafeEqual(a, s);
+}
+
 // Weekly rentals — new alongside the one-time unlocks above: cheaper, temporary access to the
 // same vehicles, billed weekly until cancelled. "Active" just means "this subscription is
 // currently live", tracked via subscriptionId + updated by the webhook below when it's created
@@ -475,6 +497,45 @@ const server = http.createServer(async (req, res) => {
       return sendJson(res, { ok: true, captured: false, kills: t.kills, justCaptured: false });
     }
 
+    // ─── DEATH DROPS — stretch goal for the client's new death-penalty system (game-social.js's
+    // applyDeathLossAndDrop()/spawnDeathDropPile()): lets OTHER real players see and loot a
+    // death pile too ("finders keepers" on someone else's death drop), not just the owner who
+    // died. Purely additive — new routes only, same atomic per-key `worldCol` pattern as
+    // territories/bosses/land/shops above, nothing existing touched. One shared 'deathDrops'
+    // document, keyed by a client-generated dropId so two different piles never collide.
+    if (p === '/api/deathdrops' && method === 'GET') return sendJson(res, await getWorldValue('deathDrops', {}));
+    if (p === '/api/deathdrops' && method === 'POST') {
+      const b = await readBody(req);
+      if (!b || !b.dropId || !b.owner || typeof b.x !== 'number' || typeof b.z !== 'number' || !b.loot) return sendJson(res, { ok: false }, 400);
+      await worldCol.updateOne(
+        { _id: 'deathDrops' },
+        { $set: { [`value.${b.dropId}`]: { owner: b.owner, x: b.x, z: b.z, loot: b.loot, createdAt: Date.now() } } },
+        { upsert: true }
+      );
+      return sendJson(res, { ok: true });
+    }
+    // Claiming is a real race between however many clients might reach for the same pile at
+    // once (the owner walking back to their own drop, or another player finding it first) — a
+    // plain read-then-delete would let two people both grab it. findOneAndUpdate's atomic
+    // $unset, checked against the BEFORE snapshot, means only the request that actually removed
+    // the key gets the loot back; every other request (or a stale/reloaded pile) gets a clean
+    // "already claimed" instead of granting the same currency/items twice.
+    if (p === '/api/deathdrops/claim' && method === 'POST') {
+      const b = await readBody(req);
+      if (!b || !b.dropId) return sendJson(res, { ok: false }, 400);
+      const before = await worldCol.findOneAndUpdate(
+        { _id: 'deathDrops' },
+        { $unset: { [`value.${b.dropId}`]: '' } },
+        { returnDocument: 'before' }
+      );
+      // Same defensive (result.value || result) unwrap as /api/territories/hit above, for the
+      // same reason: driver versions differ on whether findOneAndUpdate's result is wrapped.
+      const beforeDoc = (before && before.value) ? before.value : before;
+      const existed = beforeDoc && beforeDoc.value && beforeDoc.value[b.dropId];
+      if (!existed) return sendJson(res, { ok: false, error: 'already claimed' }, 404);
+      return sendJson(res, { ok: true, loot: existed.loot, owner: existed.owner });
+    }
+
     if (p === '/api/land' && method === 'GET') return sendJson(res, await getWorldValue('land', {}));
     if (p === '/api/land' && method === 'POST') {
       const b = await readBody(req);
@@ -659,6 +720,39 @@ const server = http.createServer(async (req, res) => {
       }
     }
 
+    // Custom Bundle — user's own ask: a real player picks an item + a currency amount + submits
+    // an idea, an ADMIN reviews the idea and either rejects it (player gets a flat 10,000 S.I.P.
+    // instead, handled entirely client-side via a normal mailbox grant — no server involvement
+    // needed for that path) or quotes it a real complication-based price; ONLY the quoted-and-
+    // accepted path reaches here. Unlike /api/checkout/create-session above, there's no fixed
+    // catalog entry to look up since the total is different for every request — the amount and
+    // what to grant both travel in the request body instead, computed client-side by the admin's
+    // own console command (adminCreateBundleCheckout(), game-admin.js) from numbers the admin
+    // explicitly typed, and isAdminRequest() below (admin name + server-only secret) is the one
+    // thing stopping a non-admin from ever reaching this path directly with a self-picked
+    // amount/grant.
+    if (p === '/api/checkout/create-custom-session' && method === 'POST') {
+      if (!stripe) return sendJson(res, { ok: false, error: 'payments not configured yet' }, 503);
+      const b = await readBody(req);
+      if (!b || !b.name || !b.returnUrl || !Number.isFinite(b.amountCents) || b.amountCents <= 0) return sendJson(res, { ok: false, error: 'missing fields' }, 400);
+      if (!isAdminRequest(b)) return sendJson(res, { ok: false, error: 'not authorized' }, 403);
+      try {
+        const base = b.returnUrl.split('?')[0];
+        const session = await stripe.checkout.sessions.create({
+          mode: 'payment',
+          line_items: [{ price_data: { currency: 'usd', product_data: { name: b.description || 'Custom Bundle' }, unit_amount: Math.round(b.amountCents) }, quantity: 1 }],
+          metadata: { name: b.name, custom: '1', sip: String(b.grantSip || 0), elite: String(b.grantElite || 0), item: b.grantItem || '' },
+          managed_payments: { enabled: false },
+          success_url: base + '?stripe=success',
+          cancel_url: base + '?stripe=cancel',
+        });
+        return sendJson(res, { ok: true, url: session.url });
+      } catch (e) {
+        console.error('custom checkout session error:', e.message);
+        return sendJson(res, { ok: false, error: 'stripe error' }, 500);
+      }
+    }
+
     if (p === '/api/checkout/webhook' && method === 'POST') {
       if (!stripe || !STRIPE_WEBHOOK_SECRET) return sendJson(res, { ok: false }, 503);
       const rawBody = await readRawBody(req);
@@ -676,7 +770,16 @@ const server = http.createServer(async (req, res) => {
           const productId = session.metadata && session.metadata.productId;
           const oneTime = productId && ONE_TIME_PRODUCTS[productId];
           const rental = productId && RENTAL_PRODUCTS[productId];
-          if (name && oneTime) await applyOneTimeGrant(name, oneTime.grant);
+          if (session.metadata && session.metadata.custom === '1') {
+            // Custom Bundle checkout (create-custom-session above) — grant exactly what the
+            // admin's own quote baked into the session's metadata at creation time, same
+            // applyOneTimeGrant() every other one-time purchase already uses.
+            if (name) await applyOneTimeGrant(name, {
+              sip: Number(session.metadata.sip) || 0,
+              elite: Number(session.metadata.elite) || 0,
+              item: session.metadata.item || undefined,
+            });
+          } else if (name && oneTime) await applyOneTimeGrant(name, oneTime.grant);
           else if (name && rental) await setRentalActive(name, rental.vehicle, session.subscription, true);
         } else if (event.type === 'customer.subscription.deleted') {
           const sub = event.data.object;
