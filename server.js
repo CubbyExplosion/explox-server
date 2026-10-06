@@ -10,7 +10,7 @@
 // two different plots/shops/territories can never stomp on each other either.
 const http = require('http');
 const url = require('url');
-const { MongoClient } = require('mongodb');
+const { MongoClient, ObjectId } = require('mongodb');
 
 const PORT = process.env.PORT || 4501;
 const MONGODB_URI = process.env.MONGODB_URI;
@@ -21,7 +21,7 @@ if (!MONGODB_URI) {
   process.exit(1);
 }
 
-let usersCol, worldCol, animatorCol, exgunUsersCol;
+let usersCol, worldCol, animatorCol, exgunUsersCol, contactCol;
 
 // ─── PER-PLAYER ACCOUNT DATA — one Mongo document per username, _id = the username itself.
 // Every read/write here only ever touches that one document, never anyone else's. ──────────
@@ -374,6 +374,35 @@ function sendJson(res, obj, status) {
   res.end(json);
 }
 
+// ── CONTACT INBOX (the owner's website: messages + photos from visitors) ─────────────────────────
+// Visitors can only SEND (POST /api/contact). Nobody can read anything except the owner, who unlocks the inbox with the secret
+// CONTACT_OWNER_KEY (set it in the host's environment variables — never in the repo). Reading/deleting uses POST so the key
+// never appears in a URL or a log line. Photos arrive as small base64 images (the website shrinks them first) and are validated here.
+const CONTACT_OWNER_KEY = process.env.CONTACT_OWNER_KEY || '';
+const contactHits = {};   // ip -> [timestamps]
+function contactBody(req, maxBytes) {
+  return new Promise((resolve) => {
+    let size = 0, chunks = [], dead = false;
+    req.on('data', c => { size += c.length; if (size > maxBytes) { dead = true; resolve(null); req.destroy(); } else chunks.push(c); });
+    req.on('end', () => { if (dead) return; try { resolve(JSON.parse(Buffer.concat(chunks).toString('utf8'))); } catch (e) { resolve(null); } });
+    req.on('error', () => resolve(null));
+  });
+}
+function contactOwnerOk(key) {
+  if (!CONTACT_OWNER_KEY || typeof key !== 'string') return false;
+  const a = Buffer.from(key), s = Buffer.from(CONTACT_OWNER_KEY);
+  return a.length === s.length && require('crypto').timingSafeEqual(a, s);
+}
+function contactRateOk(req) {
+  const ip = String(req.headers['x-forwarded-for'] || req.socket.remoteAddress || '').split(',')[0].trim();
+  const now = Date.now(), list = (contactHits[ip] || []).filter(t => now - t < 3600000);
+  if (list.length >= 6) { contactHits[ip] = list; return false; }
+  list.push(now); contactHits[ip] = list;
+  if (Object.keys(contactHits).length > 5000) Object.keys(contactHits).forEach(k => { if (!contactHits[k].some(t => now - t < 3600000)) delete contactHits[k]; });
+  return true;
+}
+const CONTACT_PHOTO_RE = /^data:image\/(jpeg|png|webp|gif);base64,[A-Za-z0-9+/=]+$/;
+
 function readBody(req) {
   return new Promise((resolve, reject) => {
     let chunks = '';
@@ -396,6 +425,33 @@ const server = http.createServer(async (req, res) => {
     if (method === 'OPTIONS') return sendJson(res, {}, 204);
 
     if (p === '/api/health' && method === 'GET') return sendJson(res, { ok: true });
+
+    if (p === '/api/contact' && method === 'POST') {                       // a visitor sends the owner a message (+ up to 3 photos)
+      if (!contactCol) return sendJson(res, { ok: false, error: 'not ready' }, 503);
+      if (!contactRateOk(req)) return sendJson(res, { ok: false, error: 'Too many messages — try again later.' }, 429);
+      const b = await contactBody(req, 5 * 1024 * 1024);
+      if (!b) return sendJson(res, { ok: false, error: 'Bad or too-large message.' }, 400);
+      const message = String(b.message || '').trim().slice(0, 2000);
+      if (!message) return sendJson(res, { ok: false, error: 'Write a message first.' }, 400);
+      const photos = (Array.isArray(b.photos) ? b.photos : []).slice(0, 3);
+      if (photos.some(ph => typeof ph !== 'string' || ph.length > 1500000 || !CONTACT_PHOTO_RE.test(ph))) return sendJson(res, { ok: false, error: 'A photo was not valid or was too big.' }, 400);
+      await contactCol.insertOne({ at: Date.now(), name: String(b.name || '').trim().slice(0, 60), reply: String(b.reply || '').trim().slice(0, 120), message, photos });
+      return sendJson(res, { ok: true });
+    }
+    if (p === '/api/contact/inbox' && method === 'POST') {                 // owner only
+      const b = await contactBody(req, 4096);
+      if (!CONTACT_OWNER_KEY) return sendJson(res, { ok: false, error: 'The owner key is not set on the server yet.' }, 503);
+      if (!b || !contactOwnerOk(b.key)) return sendJson(res, { ok: false, error: 'Wrong key.' }, 403);
+      const rows = await contactCol.find({}).sort({ at: -1 }).limit(200).toArray();
+      return sendJson(res, { ok: true, messages: rows.map(r => ({ id: String(r._id), at: r.at, name: r.name, reply: r.reply, message: r.message, photos: r.photos || [] })) });
+    }
+    if (p === '/api/contact/delete' && method === 'POST') {                // owner only
+      const b = await contactBody(req, 4096);
+      if (!b || !contactOwnerOk(b.key)) return sendJson(res, { ok: false, error: 'Wrong key.' }, 403);
+      let oid; try { oid = new ObjectId(String(b.id)); } catch (e) { return sendJson(res, { ok: false }, 400); }
+      await contactCol.deleteOne({ _id: oid });
+      return sendJson(res, { ok: true });
+    }
 
     if (p === '/api/minigame' && method === 'POST') {
       const b = await readBody(req);
@@ -824,6 +880,7 @@ async function start() {
   worldCol = dbHandle.collection('world');
   animatorCol = dbHandle.collection('animator_projects');
   exgunUsersCol = dbHandle.collection('exgun_users');
+  contactCol = dbHandle.collection('contact_messages');
   await usersCol.createIndex({ _id: 1 }); // no-op if it already exists — _id is unique by default anyway
 
   // One-time migration: the old single-document model stored everything under a "state"
