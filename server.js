@@ -435,15 +435,33 @@ const server = http.createServer(async (req, res) => {
       if (!message) return sendJson(res, { ok: false, error: 'Write a message first.' }, 400);
       const photos = (Array.isArray(b.photos) ? b.photos : []).slice(0, 3);
       if (photos.some(ph => typeof ph !== 'string' || ph.length > 1500000 || !CONTACT_PHOTO_RE.test(ph))) return sendJson(res, { ok: false, error: 'A photo was not valid or was too big.' }, 400);
-      await contactCol.insertOne({ at: Date.now(), name: String(b.name || '').trim().slice(0, 60), reply: String(b.reply || '').trim().slice(0, 120), message, photos });
-      return sendJson(res, { ok: true });
+      // 'ticket' is an unguessable private code the sender keeps, so they (and only they) can read the owner's replies to THIS message
+      const ticket = require('crypto').randomBytes(12).toString('hex');
+      await contactCol.insertOne({ at: Date.now(), name: String(b.name || '').trim().slice(0, 60), reply: String(b.reply || '').trim().slice(0, 120), message, photos, ticket, replies: [] });
+      return sendJson(res, { ok: true, ticket });
+    }
+    if (p === '/api/contact/replies' && method === 'POST') {               // a sender checks the replies to their own messages
+      const b = await contactBody(req, 4096);
+      const tickets = b && Array.isArray(b.tickets) ? b.tickets.filter(t => typeof t === 'string' && /^[a-f0-9]{24}$/.test(t)).slice(0, 10) : [];
+      if (!tickets.length) return sendJson(res, { ok: true, threads: [] });
+      const rows = await contactCol.find({ ticket: { $in: tickets } }).toArray();
+      return sendJson(res, { ok: true, threads: rows.map(r => ({ ticket: r.ticket, at: r.at, message: String(r.message).slice(0, 300), replies: r.replies || [] })) });
+    }
+    if (p === '/api/contact/reply' && method === 'POST') {                 // owner only: answer a message
+      const b = await contactBody(req, 8192);
+      if (!b || !contactOwnerOk(b.key)) return sendJson(res, { ok: false, error: 'Wrong key.' }, 403);
+      const text = String(b.text || '').trim().slice(0, 2000);
+      if (!text) return sendJson(res, { ok: false, error: 'Write a reply first.' }, 400);
+      let oid; try { oid = new ObjectId(String(b.id)); } catch (e) { return sendJson(res, { ok: false }, 400); }
+      const r = await contactCol.updateOne({ _id: oid }, { $push: { replies: { at: Date.now(), text } } });
+      return sendJson(res, { ok: r.matchedCount > 0 });
     }
     if (p === '/api/contact/inbox' && method === 'POST') {                 // owner only
       const b = await contactBody(req, 4096);
       if (!CONTACT_OWNER_KEY) return sendJson(res, { ok: false, error: 'The owner key is not set on the server yet.' }, 503);
       if (!b || !contactOwnerOk(b.key)) return sendJson(res, { ok: false, error: 'Wrong key.' }, 403);
       const rows = await contactCol.find({}).sort({ at: -1 }).limit(200).toArray();
-      return sendJson(res, { ok: true, messages: rows.map(r => ({ id: String(r._id), at: r.at, name: r.name, reply: r.reply, message: r.message, photos: r.photos || [] })) });
+      return sendJson(res, { ok: true, messages: rows.map(r => ({ id: String(r._id), at: r.at, name: r.name, reply: r.reply, message: r.message, photos: r.photos || [], replies: r.replies || [] })) });
     }
     if (p === '/api/contact/delete' && method === 'POST') {                // owner only
       const b = await contactBody(req, 4096);
