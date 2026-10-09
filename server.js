@@ -343,6 +343,40 @@ let currentEvent = null;   // {type, startedBy, startedAt, endsAt, data}
 // CHAT_HISTORY_MAX cap below trimming the oldest messages, never a server restart.
 const CHAT_HISTORY_MAX = 100; // caps storage growth on a long-running server; old messages just fall off the end
 const CHAT_TEXT_MAX = 10000; // user's own ask — raised from 200
+// ─── CHAT SAFETY — the same filter the game's client uses (explox/modules/game-safety.js), enforced HERE too so a modified client can't skip it.
+// Masks swearing / slurs, e-mail addresses, phone numbers and links. A filter is a safety net, never a guarantee. Needs a server restart to take effect.
+const CHAT_BAD_STEMS = ['fuck', 'shit', 'bitch', 'asshole', 'cunt', 'dick', 'pussy', 'whore', 'slut', 'bastard', 'nigg', 'fagg', 'faggot', 'retard', 'rape', 'rapist', 'nazi', 'porn', 'sex', 'nude', 'nudes', 'kys', 'cock', 'penis', 'vagina', 'boob', 'tits'];
+const CHAT_LEET = { '@': 'a', '4': 'a', '0': 'o', '1': 'i', '!': 'i', '3': 'e', '$': 's', '5': 's', '7': 't', '+': 't', '8': 'b' };
+function chatPlain(s) {
+  let o = ''; s = String(s).toLowerCase();
+  for (const c of s) o += CHAT_LEET[c] !== undefined ? CHAT_LEET[c] : c;
+  return o.replace(/[^a-z]/g, '').replace(/(.)\1{2,}/g, '$1$1');
+}
+function chatIsBad(token) {
+  const p = chatPlain(token); if (p.length < 3) return false;
+  const q = p.replace(/(.)\1+/g, '$1');
+  return CHAT_BAD_STEMS.some(st => st.length <= 4
+    ? (q === st || q === st + 's' || q === st + 'ing' || q === st + 'ed' || q === st + 'er' || q === st + 'y')
+    : q.indexOf(st) !== -1);
+}
+function cleanChatText(text) {
+  let t = String(text == null ? '' : text);
+  t = t.replace(/[\w.+-]+@[\w-]+\.[\w.-]+/g, '[hidden]');
+  t = t.replace(/(https?:\/\/|www\.)\S+/gi, '[link hidden]');
+  t = t.replace(/\b[\w-]+\.(com|net|org|io|gg|me|tv|co|xyz|app|ly|to|us|uk)\b\S*/gi, '[link hidden]');
+  t = t.replace(/\+?\d[\d\s().-]{6,}\d/g, '[hidden]');
+  t = t.split(/(\s+)/).map(tok => (/\S/.test(tok) && chatIsBad(tok)) ? tok.replace(/[^\s]/g, '*') : tok).join('');
+  t = t.replace(/\b(?:[a-z][\s.\-_*]+){2,}[a-z]\b/gi, m => chatIsBad(m.replace(/[\s.\-_*]/g, '')) ? m.replace(/[^\s]/g, '*') : m);
+  return t;
+}
+const chatSentAt = {};   // from -> [timestamps] (in memory, like the chat itself)
+function chatRateOk(from) {
+  const now = Date.now(), list = (chatSentAt[from] || []).filter(t => now - t < 15000);
+  if ((list.length && now - list[list.length - 1] < 1000) || list.length >= 8) { chatSentAt[from] = list; return false; }
+  list.push(now); chatSentAt[from] = list;
+  if (Object.keys(chatSentAt).length > 2000) for (const k of Object.keys(chatSentAt)) { if (!chatSentAt[k].length || now - chatSentAt[k][chatSentAt[k].length - 1] > 60000) delete chatSentAt[k]; }
+  return true;
+}
 async function addChatMessage(from, text) {
   const msg = { from, text: String(text).slice(0, CHAT_TEXT_MAX), ts: Date.now() };
   // $push + $slice is one atomic operation — keeps only the last CHAT_HISTORY_MAX messages with
@@ -531,7 +565,9 @@ const server = http.createServer(async (req, res) => {
     if (p === '/api/chat' && method === 'POST') {
       const b = await readBody(req);
       if (!b || !b.from || !b.text) return sendJson(res, { ok: false }, 400);
-      await addChatMessage(b.from, b.text);
+      const from = String(b.from).slice(0, 24);
+      if (!chatRateOk(from)) return sendJson(res, { ok: false, error: 'slow_down' }, 429);      // server-side rate limit and filter (a modified client cannot skip them)
+      await addChatMessage(from, cleanChatText(b.text));
       return sendJson(res, { ok: true });
     }
     if (p === '/api/chat' && method === 'GET') {
