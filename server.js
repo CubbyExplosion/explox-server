@@ -329,6 +329,10 @@ const PRESENCE_TIMEOUT_SEC = 8;
 // everyone online across all of them.
 const exgunPresence = {};  // name -> {..., mapId, lastSeen}
 const EXGUN_PRESENCE_TIMEOUT_SEC = 8;
+// ─── CUBBY OS FRIEND ROOMS — ephemeral, in memory: friends type the same room code and share a chat, a whiteboard and one small game state.
+// Rooms vanish after 30 idle minutes. Chat goes through the same safety filter + rate limit as the other chats.
+const osRooms = {};
+const OS_ROOM_IDLE_MS = 30 * 60 * 1000;
 const minigameState = {};  // name -> {game, data, lastSeen}
 const MINIGAME_TIMEOUT_SEC = 8;
 const mailbox = {};        // name -> [{type, from, data}]
@@ -786,6 +790,37 @@ const server = http.createServer(async (req, res) => {
       const exclude = q.exclude, mapId = q.mapId;
       const list = Object.values(exgunPresence).filter(v => v.name !== exclude && (!mapId || v.mapId === mapId));
       return sendJson(res, list);
+    }
+
+    if (p === '/api/os/room' && method === 'POST') {
+      const b = await readBody(req);
+      const code = b ? String(b.room || '').toUpperCase() : '';
+      const name = b ? String(b.name || '').replace(/[^\w ]/g, '').trim().slice(0, 14) : '';
+      if (!b || !/^[A-Z0-9]{3,8}$/.test(code) || !name) return sendJson(res, { ok: false }, 400);
+      const now = Date.now();
+      for (const k of Object.keys(osRooms)) if (now - osRooms[k].last > OS_ROOM_IDLE_MS) delete osRooms[k];
+      if (!osRooms[code] && Object.keys(osRooms).length >= 500) return sendJson(res, { ok: false, error: 'busy' }, 503);
+      const r = osRooms[code] || (osRooms[code] = { members: {}, msgs: [], strokes: [], mid: 0, sid: 0, state: null, sver: 0, last: now });
+      for (const k of Object.keys(r.members)) if (now - r.members[k] > 6000) delete r.members[k];
+      if (!r.members[name] && Object.keys(r.members).length >= 12) return sendJson(res, { ok: false, error: 'full' }, 403);
+      r.last = now; r.members[name] = now;
+      if (b.say) {
+        if (!chatRateOk('os:' + name)) return sendJson(res, { ok: false, error: 'slow_down' }, 429);
+        const text = cleanChatText(String(b.say).slice(0, 300));
+        if (text.trim()) { r.msgs.push({ id: ++r.mid, from: name, text, ts: now }); if (r.msgs.length > 100) r.msgs.shift(); }
+      }
+      if (b.clear) { r.strokes = [{ id: ++r.sid, clear: true }]; }
+      if (Array.isArray(b.strokes)) {
+        const num = v => (typeof v === 'number' && isFinite(v)) ? Math.max(0, Math.min(1000, v)) : 0;
+        for (const st of b.strokes.slice(0, 60)) {
+          if (!st || typeof st !== 'object') continue;
+          r.strokes.push({ id: ++r.sid, x0: num(st.x0), y0: num(st.y0), x1: num(st.x1), y1: num(st.y1), c: /^#[0-9a-fA-F]{6}$/.test(st.c) ? st.c : '#ffffff', w: Math.max(1, Math.min(40, +st.w || 4)) });
+        }
+        if (r.strokes.length > 1500) r.strokes = r.strokes.slice(-1500);
+      }
+      if (b.state !== undefined && b.state !== null && JSON.stringify(b.state).length < 2000) { r.state = b.state; r.sver++; }
+      const ms = +b.msgSince || 0, ss = +b.strokeSince || 0, sv = +b.stateVer || 0;
+      return sendJson(res, { ok: true, members: Object.keys(r.members), msgs: r.msgs.filter(m => m.id > ms), strokes: r.strokes.filter(x => x.id > ss), state: r.sver > sv ? r.state : undefined, sver: r.sver, mid: r.mid, sid: r.sid });
     }
 
     if (p === '/api/checkout/create-session' && method === 'POST') {
