@@ -460,6 +460,7 @@ const suinImgByIp = {};            // ip -> [timestamps]
 let suinImgDay = { d: '', n: 0 };  // global daily counter
 const SUIN_IMG_PER_HOUR = +process.env.SUIN_IMAGE_PER_HOUR || 6;
 const SUIN_IMG_PER_DAY = +process.env.SUIN_IMAGE_DAILY_MAX || 40;
+const SUIN_FREE_BAD = /\b(sex\w*|nude\w*|naked|porn\w*|erotic\w*|genital\w*|penis|vagina|breasts?|nipples?|intercourse|rape\w*|gore|gory|bloody|blood|kill\w*|murder\w*|corpses?|slaughter\w*|tortur\w*|suicid\w*|massacre\w*|cocaine|heroin|marijuana|cannabis|drugs?|alcohol\w*|drunk|nazi\w*|fetish|bdsm|strip\w*|lingerie|bikini|topless|explicit|nsfw|abuse\w*|terroris\w*|bomb\w*|shooting|guns?|rifles?|weapons?|hitler|swastika|gambl\w*|casino|hate|racist\w*)\b/i;
 async function suinOpenAI(path, body, ms) {
   const ctl = new AbortController(), t = setTimeout(() => ctl.abort(), ms || 60000);
   try {
@@ -840,7 +841,6 @@ const server = http.createServer(async (req, res) => {
     }
 
     if (p === '/api/suin/image' && method === 'POST') {
-      if (!process.env.OPENAI_API_KEY) return sendJson(res, { ok: false, error: 'not_configured' }, 503);
       const b = await readBody(req);
       const prompt = b ? String(b.prompt || '').replace(/\s+/g, ' ').trim().slice(0, 300) : '';
       if (prompt.length < 3) return sendJson(res, { ok: false, error: 'bad_prompt' }, 400);
@@ -850,6 +850,25 @@ const server = http.createServer(async (req, res) => {
       if (suinImgDay.n >= SUIN_IMG_PER_DAY) return sendJson(res, { ok: false, error: 'daily_limit' }, 429);
       const hits = (suinImgByIp[ip] || []).filter(t => now - t < 3600000);
       if (hits.length >= SUIN_IMG_PER_HOUR) return sendJson(res, { ok: false, error: 'rate_limited' }, 429);
+      if (!process.env.OPENAI_API_KEY) {
+        // FREE path (no key, no cost): Pollinations, called from this server. Kid-safe wording is added, bad words are refused first.
+        if (SUIN_FREE_BAD.test(prompt)) return sendJson(res, { ok: false, error: 'blocked' }, 200);
+        suinImgByIp[ip] = hits.concat(now); suinImgDay.n++;
+        try {
+          const clean = prompt.replace(/[^A-Za-z0-9 ,'-]/g, ' ').replace(/\s+/g, ' ').trim();
+          const styled = clean + ', children storybook illustration, colorful cartoon, friendly, wearing clothes, family-friendly, safe for kids, high quality';
+          const u = 'https://image.pollinations.ai/prompt/' + encodeURIComponent(styled) + '?width=768&height=512&nologo=true&safe=true&seed=' + Math.floor(Math.random() * 1e9);
+          const ctl = new AbortController(), t = setTimeout(() => ctl.abort(), 100000);
+          let r2; try { r2 = await fetch(u, { signal: ctl.signal, headers: { 'User-Agent': 'ExploxSuin/1.0' } }); } finally { clearTimeout(t); }
+          const ct = (r2.headers.get('content-type') || '').split(';')[0];
+          if (!r2.ok || !/^image\/(jpeg|png)$/.test(ct)) return sendJson(res, { ok: false, error: 'busy' }, 502);
+          const buf = Buffer.from(await r2.arrayBuffer());
+          if (buf.length < 2000) return sendJson(res, { ok: false, error: 'busy' }, 502);
+          return sendJson(res, { ok: true, via: 'pollinations', image: 'data:' + ct + ';base64,' + buf.toString('base64') });
+        } catch (e) {
+          return sendJson(res, { ok: false, error: 'busy' }, 502);
+        }
+      }
       try {
         // 1) moderation: refuse anything unsafe BEFORE making a picture
         const mod = await suinOpenAI('moderations', { model: 'omni-moderation-latest', input: prompt }, 15000);
@@ -864,7 +883,7 @@ const server = http.createServer(async (req, res) => {
           const code = img.data && img.data.error && img.data.error.code;
           return sendJson(res, { ok: false, error: code === 'content_policy_violation' ? 'blocked' : 'image_failed' }, code === 'content_policy_violation' ? 200 : 502);
         }
-        return sendJson(res, { ok: true, image: 'data:image/png;base64,' + b64 });
+        return sendJson(res, { ok: true, via: 'openai', image: 'data:image/png;base64,' + b64 });
       } catch (e) {
         return sendJson(res, { ok: false, error: 'image_failed' }, 502);
       }
