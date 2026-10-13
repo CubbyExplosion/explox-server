@@ -857,14 +857,17 @@ const server = http.createServer(async (req, res) => {
         try {
           const clean = prompt.replace(/[^A-Za-z0-9 ,'-]/g, ' ').replace(/\s+/g, ' ').trim();
           const styled = clean + ', children storybook illustration, colorful cartoon, friendly, wearing clothes, family-friendly, safe for kids, high quality';
-          const u = 'https://image.pollinations.ai/prompt/' + encodeURIComponent(styled) + '?width=768&height=512&nologo=true&safe=true&seed=' + Math.floor(Math.random() * 1e9);
-          const ctl = new AbortController(), t = setTimeout(() => ctl.abort(), 100000);
-          let r2; try { r2 = await fetch(u, { signal: ctl.signal, headers: { 'User-Agent': 'ExploxSuin/1.0' } }); } finally { clearTimeout(t); }
-          const ct = (r2.headers.get('content-type') || '').split(';')[0];
-          if (!r2.ok || !/^image\/(jpeg|png)$/.test(ct)) return sendJson(res, { ok: false, error: 'busy' }, 502);
+          // best model first (FLUX gives much nicer pictures); if the free quota for it is used up, fall back to the standard model
+          const base = 'https://image.pollinations.ai/prompt/' + encodeURIComponent(styled) + '?width=768&height=512&nologo=true&safe=true&seed=' + Math.floor(Math.random() * 1e9);
+          let r2 = null, ct = '', usedModel = '';
+          for (const mdl of ['flux', '']) {
+            const ctl = new AbortController(), t = setTimeout(() => ctl.abort(), 70000);
+            try { const rr = await fetch(base + (mdl ? '&model=' + mdl : ''), { signal: ctl.signal, headers: { 'User-Agent': 'ExploxSuin/1.0' } }); const c2 = (rr.headers.get('content-type') || '').split(';')[0]; if (rr.ok && /^image\/(jpeg|png)$/.test(c2)) { r2 = rr; ct = c2; usedModel = mdl || 'standard'; break; } } catch (e) { } finally { clearTimeout(t); }
+          }
+          if (!r2) return sendJson(res, { ok: false, error: 'busy' }, 502);
           const buf = Buffer.from(await r2.arrayBuffer());
           if (buf.length < 2000) return sendJson(res, { ok: false, error: 'busy' }, 502);
-          return sendJson(res, { ok: true, via: 'pollinations', image: 'data:' + ct + ';base64,' + buf.toString('base64') });
+          return sendJson(res, { ok: true, via: 'pollinations', model: usedModel, image: 'data:' + ct + ';base64,' + buf.toString('base64') });
         } catch (e) {
           return sendJson(res, { ok: false, error: 'busy' }, 502);
         }
