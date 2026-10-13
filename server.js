@@ -453,6 +453,22 @@ function readBody(req) {
   });
 }
 
+// ─── SUIN PICTURES (DALL·E) — the OpenAI key lives ONLY in this server's environment (OPENAI_API_KEY),
+// never in a web page. Every prompt is checked by OpenAI's moderation first, kid-safe wording is added,
+// and there are per-visitor and per-day limits so the bill cannot run away. ───────────────────────────
+const suinImgByIp = {};            // ip -> [timestamps]
+let suinImgDay = { d: '', n: 0 };  // global daily counter
+const SUIN_IMG_PER_HOUR = +process.env.SUIN_IMAGE_PER_HOUR || 6;
+const SUIN_IMG_PER_DAY = +process.env.SUIN_IMAGE_DAILY_MAX || 40;
+async function suinOpenAI(path, body, ms) {
+  const ctl = new AbortController(), t = setTimeout(() => ctl.abort(), ms || 60000);
+  try {
+    const r = await fetch('https://api.openai.com/v1/' + path, { method: 'POST', headers: { 'Content-Type': 'application/json', 'Authorization': 'Bearer ' + process.env.OPENAI_API_KEY }, body: JSON.stringify(body), signal: ctl.signal });
+    const d = await r.json().catch(() => ({}));
+    return { ok: r.ok, status: r.status, data: d };
+  } finally { clearTimeout(t); }
+}
+
 const server = http.createServer(async (req, res) => {
   try {
     const parsed = url.parse(req.url, true);
@@ -821,6 +837,37 @@ const server = http.createServer(async (req, res) => {
       if (b.state !== undefined && b.state !== null && JSON.stringify(b.state).length < 2000) { r.state = b.state; r.sver++; }
       const ms = +b.msgSince || 0, ss = +b.strokeSince || 0, sv = +b.stateVer || 0;
       return sendJson(res, { ok: true, members: Object.keys(r.members), msgs: r.msgs.filter(m => m.id > ms), strokes: r.strokes.filter(x => x.id > ss), state: r.sver > sv ? r.state : undefined, sver: r.sver, mid: r.mid, sid: r.sid });
+    }
+
+    if (p === '/api/suin/image' && method === 'POST') {
+      if (!process.env.OPENAI_API_KEY) return sendJson(res, { ok: false, error: 'not_configured' }, 503);
+      const b = await readBody(req);
+      const prompt = b ? String(b.prompt || '').replace(/\s+/g, ' ').trim().slice(0, 300) : '';
+      if (prompt.length < 3) return sendJson(res, { ok: false, error: 'bad_prompt' }, 400);
+      const ip = String(req.headers['x-forwarded-for'] || req.socket.remoteAddress || '').split(',')[0].trim();
+      const now = Date.now(), day = new Date().toISOString().slice(0, 10);
+      if (suinImgDay.d !== day) suinImgDay = { d: day, n: 0 };
+      if (suinImgDay.n >= SUIN_IMG_PER_DAY) return sendJson(res, { ok: false, error: 'daily_limit' }, 429);
+      const hits = (suinImgByIp[ip] || []).filter(t => now - t < 3600000);
+      if (hits.length >= SUIN_IMG_PER_HOUR) return sendJson(res, { ok: false, error: 'rate_limited' }, 429);
+      try {
+        // 1) moderation: refuse anything unsafe BEFORE making a picture
+        const mod = await suinOpenAI('moderations', { model: 'omni-moderation-latest', input: prompt }, 15000);
+        if (!mod.ok) return sendJson(res, { ok: false, error: 'moderation_failed' }, 502);
+        const flagged = mod.data && mod.data.results && mod.data.results[0] && mod.data.results[0].flagged;
+        if (flagged) return sendJson(res, { ok: false, error: 'blocked' }, 200);
+        // 2) the picture (kid-safe wording is always added)
+        suinImgByIp[ip] = hits.concat(now); suinImgDay.n++;
+        const img = await suinOpenAI('images/generations', { model: process.env.SUIN_IMAGE_MODEL || 'dall-e-3', prompt: prompt + '. Friendly, family-safe, colourful illustration suitable for children.', n: 1, size: '1024x1024', response_format: 'b64_json' }, 90000);
+        const b64 = img.ok && img.data && img.data.data && img.data.data[0] && img.data.data[0].b64_json;
+        if (!b64) {
+          const code = img.data && img.data.error && img.data.error.code;
+          return sendJson(res, { ok: false, error: code === 'content_policy_violation' ? 'blocked' : 'image_failed' }, code === 'content_policy_violation' ? 200 : 502);
+        }
+        return sendJson(res, { ok: true, image: 'data:image/png;base64,' + b64 });
+      } catch (e) {
+        return sendJson(res, { ok: false, error: 'image_failed' }, 502);
+      }
     }
 
     if (p === '/api/checkout/create-session' && method === 'POST') {
