@@ -470,6 +470,18 @@ async function suinOpenAI(path, body, ms) {
   } finally { clearTimeout(t); }
 }
 
+// ─── SUIN → CHATGPT: Suin forwards a question to OpenAI's chat model and shows the answer. The key stays here
+// (OPENAI_API_KEY); the question AND the answer both go through OpenAI's moderation; short, kid-safe replies only. ──────
+const suinChatByIp = {}; let suinChatDay = { d: '', n: 0 };
+const SUIN_CHAT_PER_HOUR = +process.env.SUIN_CHAT_PER_HOUR || 20;
+const SUIN_CHAT_PER_DAY = +process.env.SUIN_CHAT_DAILY_MAX || 300;
+const SUIN_SYSTEM = "You are Suin, a friendly, honest chatbot used by kids and families on the Cubby Explosion website. Keep answers short (under 120 words), simple and kind. Be accurate; if you are not sure, say so. Never give instructions for hacking, stealing, weapons, drugs, self-harm or anything dangerous, never produce adult content, and never ask for passwords or personal details. If someone seems upset or in danger, be caring and tell them to talk to a trusted grown-up. Do not claim to be a person.";
+async function suinFlagged(text) {
+  const m = await suinOpenAI('moderations', { model: 'omni-moderation-latest', input: text }, 15000);
+  if (!m.ok) return null;
+  return !!(m.data && m.data.results && m.data.results[0] && m.data.results[0].flagged);
+}
+
 const server = http.createServer(async (req, res) => {
   try {
     const parsed = url.parse(req.url, true);
@@ -889,6 +901,35 @@ const server = http.createServer(async (req, res) => {
         return sendJson(res, { ok: true, via: 'openai', image: 'data:image/png;base64,' + b64 });
       } catch (e) {
         return sendJson(res, { ok: false, error: 'image_failed' }, 502);
+      }
+    }
+
+    if (p === '/api/suin/chat' && method === 'POST') {
+      if (!process.env.OPENAI_API_KEY) return sendJson(res, { ok: false, error: 'not_configured' }, 503);
+      const b = await readBody(req);
+      const text = b ? String(b.text || '').replace(/\s+/g, ' ').trim().slice(0, 500) : '';
+      if (text.length < 2) return sendJson(res, { ok: false, error: 'bad_prompt' }, 400);
+      const hist = (b && Array.isArray(b.history) ? b.history : []).slice(-6).filter(h => h && (h.role === 'user' || h.role === 'assistant') && typeof h.content === 'string').map(h => ({ role: h.role, content: h.content.slice(0, 500) }));
+      const ip = String(req.headers['x-forwarded-for'] || req.socket.remoteAddress || '').split(',')[0].trim();
+      const now = Date.now(), day = new Date().toISOString().slice(0, 10);
+      if (suinChatDay.d !== day) suinChatDay = { d: day, n: 0 };
+      if (suinChatDay.n >= SUIN_CHAT_PER_DAY) return sendJson(res, { ok: false, error: 'daily_limit' }, 429);
+      const hits = (suinChatByIp[ip] || []).filter(t => now - t < 3600000);
+      if (hits.length >= SUIN_CHAT_PER_HOUR) return sendJson(res, { ok: false, error: 'rate_limited' }, 429);
+      try {
+        const f1 = await suinFlagged(text);
+        if (f1 === null) return sendJson(res, { ok: false, error: 'moderation_failed' }, 502);
+        if (f1) return sendJson(res, { ok: false, error: 'blocked' }, 200);
+        suinChatByIp[ip] = hits.concat(now); suinChatDay.n++;
+        const model = process.env.SUIN_CHAT_MODEL || 'gpt-4o-mini';
+        const c = await suinOpenAI('chat/completions', { model, max_tokens: 400, temperature: 0.7, messages: [{ role: 'system', content: SUIN_SYSTEM }].concat(hist, [{ role: 'user', content: text }]) }, 60000);
+        const reply = c.ok && c.data && c.data.choices && c.data.choices[0] && c.data.choices[0].message && String(c.data.choices[0].message.content || '').trim();
+        if (!reply) return sendJson(res, { ok: false, error: 'chat_failed' }, 502);
+        const f2 = await suinFlagged(reply.slice(0, 2000));
+        if (f2) return sendJson(res, { ok: false, error: 'blocked' }, 200);
+        return sendJson(res, { ok: true, reply: reply.slice(0, 2000), model });
+      } catch (e) {
+        return sendJson(res, { ok: false, error: 'chat_failed' }, 502);
       }
     }
 
