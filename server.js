@@ -442,6 +442,16 @@ function contactRateOk(req) {
 }
 const CONTACT_PHOTO_RE = /^data:image\/(jpeg|png|webp|gif);base64,[A-Za-z0-9+/=]+$/;
 
+// ── EXWORLD BOSS state (shared HP, resets 90 seconds after he is defeated) ──
+const BOSS_MAX = 100000000; const bossHits = {}; let bossCol = null, bossDmgCol = null;
+async function bossState() {
+  let d = await bossCol.findOne({ _id: 'cubby' });
+  if (!d) { try { await bossCol.insertOne({ _id: 'cubby', hp: BOSS_MAX, kills: 0 }); } catch (e) { } d = await bossCol.findOne({ _id: 'cubby' }); }
+  if (d.hp <= 0 && Date.now() - (d.downAt || 0) > 90000) { await bossCol.updateOne({ _id: 'cubby' }, { $set: { hp: BOSS_MAX } }); await bossDmgCol.deleteMany({}); d.hp = BOSS_MAX; }
+  const top = await bossDmgCol.find({}).sort({ dmg: -1 }).limit(5).toArray();
+  return { ok: true, hp: Math.max(0, d.hp), max: BOSS_MAX, kills: d.kills || 0, top: top.map(t => ({ name: t.name, dmg: t.dmg })) };
+}
+
 function readBody(req) {
   return new Promise((resolve, reject) => {
     let chunks = '';
@@ -494,6 +504,30 @@ const server = http.createServer(async (req, res) => {
 
     if (p === '/api/health' && method === 'GET') return sendJson(res, { ok: true });
 
+    // ── EXWORLD BOSS: one shared Cubby Explosion for every player (100,000,000 HP). Players only send a random id + damage dealt. ──
+    if (p === '/api/exworld/boss' && method === 'GET') {
+      if (!bossCol) return sendJson(res, { ok: false, error: 'not ready' }, 503);
+      return sendJson(res, await bossState());
+    }
+    if (p === '/api/exworld/boss/hit' && method === 'POST') {
+      if (!bossCol) return sendJson(res, { ok: false, error: 'not ready' }, 503);
+      const ip = String(req.headers['x-forwarded-for'] || req.socket.remoteAddress || '').split(',')[0].trim(), now = Date.now();
+      if (now - (bossHits[ip] || 0) < 900) return sendJson(res, { ok: false, error: 'slow down' }, 429);
+      bossHits[ip] = now; if (Object.keys(bossHits).length > 5000) Object.keys(bossHits).forEach(k => { if (now - bossHits[k] > 60000) delete bossHits[k]; });
+      const b = await contactBody(req, 2048); if (!b) return sendJson(res, { ok: false }, 400);
+      const id = String(b.id || '').replace(/[^a-z0-9]/gi, '').slice(0, 16); if (id.length < 6) return sendJson(res, { ok: false }, 400);
+      const dmg = Math.max(0, Math.min(5000, Math.floor(+b.dmg || 0))), name = cleanChatText(String(b.name || '').trim().slice(0, 16)) || 'Player ' + id.slice(0, 4);
+      await bossState();
+      if (dmg > 0) {
+        const r = await bossCol.findOneAndUpdate({ _id: 'cubby', hp: { $gt: 0 } }, { $inc: { hp: -dmg } }, { returnDocument: 'after' });
+        const doc = r && (r.value !== undefined ? r.value : r);
+        if (doc) {
+          if (doc.hp <= 0) await bossCol.updateOne({ _id: 'cubby' }, { $set: { hp: 0, downAt: now, kills: (doc.kills || 0) + 1 } });
+          await bossDmgCol.updateOne({ _id: id }, { $inc: { dmg }, $set: { name, at: now } }, { upsert: true });
+        }
+      }
+      return sendJson(res, await bossState());
+    }
     if (p === '/api/contact' && method === 'POST') {                       // a visitor sends the owner a message (+ up to 3 photos)
       if (!contactCol) return sendJson(res, { ok: false, error: 'not ready' }, 503);
       if (!contactRateOk(req)) return sendJson(res, { ok: false, error: 'Too many messages — try again later.' }, 429);
@@ -1105,6 +1139,7 @@ async function start() {
   animatorCol = dbHandle.collection('animator_projects');
   exgunUsersCol = dbHandle.collection('exgun_users');
   contactCol = dbHandle.collection('contact_messages');
+  bossCol = dbHandle.collection('exworld_boss'); bossDmgCol = dbHandle.collection('exworld_boss_dmg');
   await usersCol.createIndex({ _id: 1 }); // no-op if it already exists — _id is unique by default anyway
 
   // One-time migration: the old single-document model stored everything under a "state"
