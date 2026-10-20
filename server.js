@@ -493,6 +493,8 @@ async function suinFlagged(text) {
   return !!(m.data && m.data.results && m.data.results[0] && m.data.results[0].flagged);
 }
 
+const exworldMp = require('./exworld-mp')({ sendJson, getStore: (id, fb) => getWorldValue(id, fb), setStore: (id, v) => worldCol.updateOne({ _id: id }, { $set: { value: v } }, { upsert: true }) });
+
 const server = http.createServer(async (req, res) => {
   try {
     const parsed = url.parse(req.url, true);
@@ -501,6 +503,8 @@ const server = http.createServer(async (req, res) => {
     const method = req.method;
 
     if (method === 'OPTIONS') return sendJson(res, {}, 204);
+
+    if (await exworldMp(req, res, p, method, q)) return;   // Exworld multiplayer rooms (see exworld-mp.js)
 
     if (p === '/api/health' && method === 'GET') return sendJson(res, { ok: true });
 
