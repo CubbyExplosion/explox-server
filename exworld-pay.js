@@ -20,6 +20,7 @@ module.exports = function createExworldPay(deps) {
     exip1000: { name: '1,000 ExIP', cents: 500, kind: 'exip', amount: 1000 },
     exip100000: { name: '100,000 ExIP', cents: 1000, kind: 'exip', amount: 100000 },
     mp_pass: { name: 'Multiplayer server pass (monthly)', cents: 1999, kind: 'pass' },
+    member: { name: 'Member pass (monthly): half price on everything', cents: 2500, kind: 'member' },
   };
   const A = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789';
   const code6 = () => { let s = ''; for (let i = 0; i < 6; i++) s += A[crypto.randomInt(A.length)]; return s; };
@@ -46,6 +47,14 @@ module.exports = function createExworldPay(deps) {
     } catch (e) { /* if Stripe cannot be reached, keep the dates we already have */ }
   }
 
+  // a member code is active while its Stripe subscription is paid; members get half off everything in the shop
+  async function memberActive(code) {
+    code = String(code || '').trim().toUpperCase().slice(0, 40); if (!code) return null;
+    const all = (await getStore('exworld_members', {})) || {}, e = all[code]; if (!e) return null;
+    const before = e.expires; await refreshPass(e); if (e.expires !== before) { all[code] = e; await setStore('exworld_members', all); }
+    return e.expires > Date.now() ? e : null;
+  }
+
   async function handle(req, res, p, method, q) {
     if (!p.startsWith('/api/exworld/pay/')) return false;
     const route = p.slice('/api/exworld/pay/'.length), st = process.env.EXWORLD_SHOP === 'on' ? stripe() : null;   // the shop stays closed until a parent sets EXWORLD_SHOP=on
@@ -54,6 +63,7 @@ module.exports = function createExworldPay(deps) {
       const key = process.env.EXWORLD_STRIPE_KEY || process.env.STRIPE_SECRET_KEY || '';
       return sendJson(res, { ok: true, enabled: !!st, test: key.startsWith('sk_test_'), products: Object.keys(PRODUCTS).map((id) => ({ id, name: PRODUCTS[id].name, cents: PRODUCTS[id].cents, kind: PRODUCTS[id].kind, amount: PRODUCTS[id].amount || 0 })) }), true;
     }
+    if (route === 'member' && method === 'GET') { const e = await memberActive(q.code); return sendJson(res, { ok: true, active: !!e, expires: e ? e.expires : 0 }), true; }
     if (method !== 'POST') return sendJson(res, { ok: false, error: 'unknown route' }, 404), true;
     const b = await readJson(req, 4096) || {};
     if (!st) return sendJson(res, { ok: false, error: 'The shop is not open yet.' }, 503), true;
@@ -63,15 +73,16 @@ module.exports = function createExworldPay(deps) {
       const prod = PRODUCTS[String(b.product || '')]; if (!prod) return sendJson(res, { ok: false, error: 'unknown product' }, 404), true;
       let base; try { const u = new URL(String(b.returnUrl || '')); if (u.protocol !== 'https:' && u.protocol !== 'http:') throw new Error('x'); base = u.origin + u.pathname; } catch (e) { return sendJson(res, { ok: false, error: 'bad return address' }, 400), true; }
       try {
-        const item = { price_data: { currency: 'usd', product_data: { name: prod.name }, unit_amount: prod.cents }, quantity: 1 };
-        if (prod.kind === 'pass') item.price_data.recurring = { interval: 'month' };
+        const isMember = prod.kind !== 'member' && !!(await memberActive(b.member)), price = isMember ? Math.round(prod.cents / 2) : prod.cents;   // members pay half
+        const item = { price_data: { currency: 'usd', product_data: { name: prod.name + (isMember ? ' (member price)' : '') }, unit_amount: price }, quantity: 1 };
+        if (prod.kind === 'pass' || prod.kind === 'member') item.price_data.recurring = { interval: 'month' };
         const common = {
-          mode: prod.kind === 'pass' ? 'subscription' : 'payment', line_items: [item], metadata: { exworld: '1', product: String(b.product) },
+          mode: (prod.kind === 'pass' || prod.kind === 'member') ? 'subscription' : 'payment', line_items: [item], metadata: { exworld: '1', product: String(b.product) },
           payment_method_types: ['card'],   // ask for cards directly, so the dashboard's payment-method list cannot leave this empty
           managed_payments: { enabled: false },
           success_url: base + '?exs={CHECKOUT_SESSION_ID}', cancel_url: base + '?exs=cancel',
         };
-        if (prod.kind === 'pass') common.subscription_data = { metadata: { exworld: '1', product: String(b.product) } };
+        if (prod.kind === 'pass' || prod.kind === 'member') common.subscription_data = { metadata: { exworld: '1', product: String(b.product) } };
         let session;
         try { session = await st.checkout.sessions.create(common); }
         catch (e1) {   // some Stripe accounts do not accept managed_payments: try again without it
@@ -98,6 +109,11 @@ module.exports = function createExworldPay(deps) {
             const codes = (await getStore('exworld_codes', {})) || {}, code = 'EXIP-' + code6() + '-' + code6();
             codes[code] = { amount: prod.amount, used: false, made: Date.now() }; await setStore('exworld_codes', codes);
             res2 = { kind: 'exip', code, amount: prod.amount };
+          } else if (prod.kind === 'member') {
+            const all = (await getStore('exworld_members', {})) || {}, code = 'MEM-' + code6() + '-' + code6(), subId = typeof session.subscription === 'string' ? session.subscription : (session.subscription && session.subscription.id) || '';
+            const entry = { expires: Date.now() + 31 * 86400000, sub: subId, made: Date.now() }; await refreshPass(entry);
+            all[code] = entry; await setStore('exworld_members', all);
+            res2 = { kind: 'member', code, expires: entry.expires };
           } else {
             const passes = (await getStore('exworld_passes', {})) || {}, code = 'EXP-' + code6() + '-' + code6(), subId = typeof session.subscription === 'string' ? session.subscription : (session.subscription && session.subscription.id) || '';
             const entry = { days: 31, expires: Date.now() + 31 * 86400000, sub: subId, note: 'stripe', made: Date.now() }; await refreshPass(entry);
