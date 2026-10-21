@@ -494,7 +494,9 @@ async function suinFlagged(text) {
 }
 
 const exworldStore = { getStore: (id, fb) => getWorldValue(id, fb), setStore: (id, v) => worldCol.updateOne({ _id: id }, { $set: { value: v } }, { upsert: true }) };
-const exworldPay = require('./exworld-pay')({ sendJson, getStripe: () => stripe, ...exworldStore });   // Exworld shop (Stripe Checkout, keys come from the environment)
+// Exworld can use its own Stripe key (EXWORLD_STRIPE_KEY, for example a test key) while the rest of the server keeps STRIPE_SECRET_KEY. Without it, Exworld uses the normal key.
+const exworldStripeOwn = process.env.EXWORLD_STRIPE_KEY ? new Stripe(process.env.EXWORLD_STRIPE_KEY) : null;
+const exworldPay = require('./exworld-pay')({ sendJson, getStripe: () => exworldStripeOwn || stripe, ...exworldStore });   // Exworld shop (Stripe Checkout, keys come from the environment)
 const exworldMp = require('./exworld-mp')({ sendJson, refreshPass: (e) => exworldPay.refreshPass(e), ...exworldStore });
 
 const server = http.createServer(async (req, res) => {

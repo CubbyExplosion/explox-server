@@ -51,7 +51,7 @@ module.exports = function createExworldPay(deps) {
     const route = p.slice('/api/exworld/pay/'.length), st = process.env.EXWORLD_SHOP === 'on' ? stripe() : null;   // the shop stays closed until a parent sets EXWORLD_SHOP=on
 
     if (route === 'config' && method === 'GET') {
-      const key = process.env.STRIPE_SECRET_KEY || '';
+      const key = process.env.EXWORLD_STRIPE_KEY || process.env.STRIPE_SECRET_KEY || '';
       return sendJson(res, { ok: true, enabled: !!st, test: key.startsWith('sk_test_'), products: Object.keys(PRODUCTS).map((id) => ({ id, name: PRODUCTS[id].name, cents: PRODUCTS[id].cents, kind: PRODUCTS[id].kind, amount: PRODUCTS[id].amount || 0 })) }), true;
     }
     if (method !== 'POST') return sendJson(res, { ok: false, error: 'unknown route' }, 404), true;
