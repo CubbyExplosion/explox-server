@@ -67,6 +67,7 @@ module.exports = function createExworldPay(deps) {
         if (prod.kind === 'pass') item.price_data.recurring = { interval: 'month' };
         const common = {
           mode: prod.kind === 'pass' ? 'subscription' : 'payment', line_items: [item], metadata: { exworld: '1', product: String(b.product) },
+          payment_method_types: ['card'],   // ask for cards directly, so the dashboard's payment-method list cannot leave this empty
           managed_payments: { enabled: false },
           success_url: base + '?exs={CHECKOUT_SESSION_ID}', cancel_url: base + '?exs=cancel',
         };
