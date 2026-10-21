@@ -493,7 +493,9 @@ async function suinFlagged(text) {
   return !!(m.data && m.data.results && m.data.results[0] && m.data.results[0].flagged);
 }
 
-const exworldMp = require('./exworld-mp')({ sendJson, getStore: (id, fb) => getWorldValue(id, fb), setStore: (id, v) => worldCol.updateOne({ _id: id }, { $set: { value: v } }, { upsert: true }) });
+const exworldStore = { getStore: (id, fb) => getWorldValue(id, fb), setStore: (id, v) => worldCol.updateOne({ _id: id }, { $set: { value: v } }, { upsert: true }) };
+const exworldPay = require('./exworld-pay')({ sendJson, getStripe: () => stripe, ...exworldStore });   // Exworld shop (Stripe Checkout, keys come from the environment)
+const exworldMp = require('./exworld-mp')({ sendJson, refreshPass: (e) => exworldPay.refreshPass(e), ...exworldStore });
 
 const server = http.createServer(async (req, res) => {
   try {
@@ -505,6 +507,7 @@ const server = http.createServer(async (req, res) => {
     if (method === 'OPTIONS') return sendJson(res, {}, 204);
 
     if (await exworldMp(req, res, p, method, q)) return;   // Exworld multiplayer rooms (see exworld-mp.js)
+    if (await exworldPay(req, res, p, method, q)) return;   // Exworld shop (see exworld-pay.js)
 
     if (p === '/api/health' && method === 'GET') return sendJson(res, { ok: true });
 

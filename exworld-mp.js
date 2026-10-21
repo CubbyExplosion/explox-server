@@ -75,6 +75,7 @@ module.exports = function createExworldMp(deps) {
       const b = await readJson(req, 4096); if (!b) return sendJson(res, { ok: false, error: 'bad request' }, 400), true;
       const pass = String(b.pass || '').trim().toUpperCase().slice(0, 40), db = await passes(), e = db[pass];
       if (!e) return sendJson(res, { ok: false, error: 'That server pass is not valid.' }, 403), true;
+      if (e.sub && deps.refreshPass) { const before = e.expires; await deps.refreshPass(e); if (e.expires !== before) await setStore('exworld_passes', db); }
       const now = Date.now(); if (!e.expires) { e.expires = now + e.days * 86400000; await setStore('exworld_passes', db); }
       if (now > e.expires) return sendJson(res, { ok: false, error: 'That server pass has run out. Get a new one to keep hosting.' }, 403), true;
       rooms.forEach((r) => { if (r.pass === pass) closeRoom(r, 'The host started a new server'); });
