@@ -71,9 +71,14 @@ module.exports = function createExworldPay(deps) {
           success_url: base + '?exs={CHECKOUT_SESSION_ID}', cancel_url: base + '?exs=cancel',
         };
         if (prod.kind === 'pass') common.subscription_data = { metadata: { exworld: '1', product: String(b.product) } };
-        const session = await st.checkout.sessions.create(common);
+        let session;
+        try { session = await st.checkout.sessions.create(common); }
+        catch (e1) {   // some Stripe accounts do not accept managed_payments: try again without it
+          if (!/managed_payments/i.test(String(e1.message))) throw e1;
+          delete common.managed_payments; session = await st.checkout.sessions.create(common);
+        }
         return sendJson(res, { ok: true, url: session.url }), true;
-      } catch (e) { console.error('exworld checkout error:', e.message); return sendJson(res, { ok: false, error: 'Could not start the payment.' }, 500), true; }
+      } catch (e) { console.error('exworld checkout error:', e.message); return sendJson(res, { ok: false, error: 'Could not start the payment: ' + String(e.message || 'unknown error').slice(0, 180) }, 500), true; }
     }
 
     // the player is back from Stripe: check it was really paid and hand over the code
