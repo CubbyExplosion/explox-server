@@ -497,6 +497,10 @@ const exworldStore = { getStore: (id, fb) => getWorldValue(id, fb), setStore: (i
 // Exworld can use its own Stripe key (EXWORLD_STRIPE_KEY, for example a test key) while the rest of the server keeps STRIPE_SECRET_KEY. Without it, Exworld uses the normal key.
 const exworldStripeOwn = process.env.EXWORLD_STRIPE_KEY ? new Stripe(process.env.EXWORLD_STRIPE_KEY) : null;
 const exworldPay = require('./exworld-pay')({ sendJson, getStripe: () => exworldStripeOwn || stripe, ...exworldStore });   // Exworld shop (Stripe Checkout, keys come from the environment)
+// Exworld ad reward: a one-time code worth 100 S.I.P., redeemed into any Explox account by name (see exworld-sip.js)
+const exworldSip = require('./exworld-sip')({ sendJson, ...exworldStore,
+  userByName: async (name) => { const n = String(name || '').trim(); if (!n) return null; const d = await usersCol.findOne({ _id: n }, { projection: { _id: 1 }, collation: { locale: 'en', strength: 2 } }); return d ? d._id : null; },
+  grant: (name, sip) => applyOneTimeGrant(name, { sip }) });
 const exworldMp = require('./exworld-mp')({ sendJson, refreshPass: (e) => exworldPay.refreshPass(e), ...exworldStore });
 
 const server = http.createServer(async (req, res) => {
@@ -510,6 +514,7 @@ const server = http.createServer(async (req, res) => {
 
     if (await exworldMp(req, res, p, method, q)) return;   // Exworld multiplayer rooms (see exworld-mp.js)
     if (await exworldPay(req, res, p, method, q)) return;   // Exworld shop (see exworld-pay.js)
+    if (await exworldSip(req, res, p, method, q)) return;   // Exworld ad reward codes (see exworld-sip.js)
 
     if (p === '/api/health' && method === 'GET') return sendJson(res, { ok: true });
 
