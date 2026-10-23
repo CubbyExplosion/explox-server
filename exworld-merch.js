@@ -6,8 +6,8 @@ module.exports = function createMerch(deps) {
   const { sendJson, getStripe } = deps;
   const ITEMS = { shirt: { label: 'T-shirt', cents: 2000 }, sticker: { label: 'Sticker', cents: 300 } };   // base prices: change them here
   const LETTER_CENTS = 500, MAX_LETTERS = 12;
-  const BASES = [['cubby_shirt', 'Cubby Explosion shirt', 'shirt'], ['explox_shirt_1_character', 'Explox character shirt', 'shirt'], ['explox_shirt_2_vehicle', 'Explox vehicle shirt', 'shirt'], ['exgun_shirt_1_tank', 'EXGUN tank shirt', 'shirt'], ['sip_shirt_logo', 'S.I.P. logo shirt', 'shirt'],
-    ['cubby_sticker', 'Cubby Explosion sticker', 'sticker'], ['explox_sticker_1_character', 'Explox character sticker', 'sticker'], ['explox_sticker_2_vehicle', 'Explox vehicle sticker', 'sticker'], ['exgun_sticker_1_tank', 'EXGUN tank sticker', 'sticker'], ['sip_sticker_logo', 'S.I.P. logo sticker', 'sticker']];
+  const BASES = [['cubby_shirt', 'Cubby Explosion shirt', 'shirt'], ['explox_shirt_1_character', 'Explox character shirt', 'shirt'], ['explox_shirt_2_vehicle', 'Explox vehicle shirt', 'shirt'], ['exgun_shirt_1_tank', 'EXGUN tank shirt', 'shirt'], ['sip_shirt_logo', 'S.I.P. logo shirt', 'shirt'], ['rich_shirt', 'RICH shirt', 'shirt'], ['death_shirt', 'DEATH shirt', 'shirt'],
+    ['cubby_sticker', 'Cubby Explosion sticker', 'sticker'], ['rich_sticker', 'RICH sticker', 'sticker'], ['death_sticker', 'DEATH sticker', 'sticker'], ['explox_sticker_1_character', 'Explox character sticker', 'sticker'], ['explox_sticker_2_vehicle', 'Explox vehicle sticker', 'sticker'], ['exgun_sticker_1_tank', 'EXGUN tank sticker', 'sticker'], ['sip_sticker_logo', 'S.I.P. logo sticker', 'sticker']];
   const DESIGNS = {};   // every design comes in a dark and a light version
   ['dark', 'light'].forEach((m) => BASES.forEach((x) => { DESIGNS[x[0] + '_' + m] = [x[1] + ' (' + m + ')' + (x[0] === 'cubby_shirt' ? ', back says CUBBY EXPLOSION' : ''), x[2]]; }));
 
