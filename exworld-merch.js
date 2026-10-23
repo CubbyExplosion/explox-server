@@ -57,6 +57,21 @@ module.exports = function createMerch(deps) {
         return sendJson(res, { ok: true, url: session.url, cents }), true;
       } catch (e) { console.error('merch checkout error:', e.message); return sendJson(res, { ok: false, error: 'Could not start the payment: ' + String(e.message || '').slice(0, 160) }, 500), true; }
     }
+    if (route === 'tip' && method === 'POST') {   // a thank-you gift of $1 to $10; the amount is checked here, never trusted from the page
+      if (!st) return sendJson(res, { ok: false, error: 'Tips are not open yet.' }, 503), true;
+      const b = await readJson(req, 2048) || {}, dollars = Math.floor(Number(b.dollars));
+      if (!(dollars >= 1 && dollars <= 10)) return sendJson(res, { ok: false, error: 'A tip can be from $1 to $10.' }, 400), true;
+      let base; try { const u = new URL(String(b.returnUrl || '')); if (u.protocol !== 'https:' && u.protocol !== 'http:') throw new Error('x'); base = u.origin + u.pathname; } catch (e) { return sendJson(res, { ok: false, error: 'bad return address' }, 400), true; }
+      try {
+        const session = await st.checkout.sessions.create({
+          mode: 'payment', payment_method_types: ['card'], managed_payments: { enabled: false },
+          line_items: [{ price_data: { currency: 'usd', product_data: { name: 'Tip (thank you!)' }, unit_amount: dollars * 100 }, quantity: 1 }],
+          metadata: { tip: '1', dollars: String(dollars) },
+          success_url: base + '?tip=1', cancel_url: base + '?cancel=1',
+        });
+        return sendJson(res, { ok: true, url: session.url }), true;
+      } catch (e) { console.error('tip error:', e.message); return sendJson(res, { ok: false, error: 'Could not start the tip: ' + String(e.message || '').slice(0, 160) }, 500), true; }
+    }
     return sendJson(res, { ok: false, error: 'unknown route' }, 404), true;
   };
 };
