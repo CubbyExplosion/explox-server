@@ -7,6 +7,7 @@ module.exports = function createMerch(deps) {
   const ITEMS = { shirt: { label: 'T-shirt', cents: 2000 }, sticker: { label: 'Sticker', cents: 300 } };   // base prices: change them here
   const LETTER_CENTS = 500, MAX_LETTERS = 12;
   const DESIGNS = {
+    cubby_shirt_dark: ['Cubby Explosion shirt (dark, back says CUBBY EXPLOSION)', 'shirt'], cubby_shirt_light: ['Cubby Explosion shirt (light, back says CUBBY EXPLOSION)', 'shirt'],
     explox_shirt_1_character: ['Explox character shirt', 'shirt'], explox_shirt_2_vehicle: ['Explox vehicle shirt', 'shirt'], exgun_shirt_1_tank: ['EXGUN tank shirt', 'shirt'], sip_shirt_logo: ['S.I.P. logo shirt', 'shirt'],
     explox_sticker_1_character: ['Explox character sticker', 'sticker'], explox_sticker_2_vehicle: ['Explox vehicle sticker', 'sticker'], exgun_sticker_1_tank: ['EXGUN tank sticker', 'sticker'], sip_sticker_logo: ['S.I.P. logo sticker', 'sticker'],
   };
