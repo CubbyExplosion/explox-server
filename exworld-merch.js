@@ -4,7 +4,7 @@
 // Like the rest of the shop it stays closed until EXWORLD_SHOP is set to "on", and it uses whatever Stripe key the server has (test or live).
 module.exports = function createMerch(deps) {
   const { sendJson, getStripe } = deps;
-  const ITEMS = { shirt: { label: 'T-shirt', cents: 2000 }, sticker: { label: 'Sticker', cents: 300 } };   // base prices: change them here
+  const ITEMS = { shirt: { label: 'T-shirt', cents: 2500 }, sticker: { label: 'Sticker', cents: 500 } };   // base prices: change them here
   const LETTER_CENTS = 500, MAX_LETTERS = 12;
   const BASES = [['cubby_shirt', 'Cubby Explosion shirt', 'shirt'], ['explox_shirt_1_character', 'Explox character shirt', 'shirt'], ['explox_shirt_2_vehicle', 'Explox vehicle shirt', 'shirt'], ['exgun_shirt_1_tank', 'EXGUN tank shirt', 'shirt'], ['sip_shirt_logo', 'S.I.P. logo shirt', 'shirt'], ['rich_shirt', 'RICH shirt', 'shirt'], ['death_shirt', 'DEATH shirt', 'shirt'],
     ['cubby_sticker', 'Cubby Explosion sticker', 'sticker'], ['rich_sticker', 'RICH sticker', 'sticker'], ['death_sticker', 'DEATH sticker', 'sticker'], ['explox_sticker_1_character', 'Explox character sticker', 'sticker'], ['explox_sticker_2_vehicle', 'Explox vehicle sticker', 'sticker'], ['exgun_sticker_1_tank', 'EXGUN tank sticker', 'sticker'], ['sip_sticker_logo', 'S.I.P. logo sticker', 'sticker']];
