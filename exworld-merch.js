@@ -3,7 +3,10 @@
 // Stripe collects the delivery address and keeps the order (design, name, size) in the payment's details, so the seller can see every order in the Stripe dashboard.
 // Like the rest of the shop it stays closed until EXWORLD_SHOP is set to "on", and it uses whatever Stripe key the server has (test or live).
 module.exports = function createMerch(deps) {
-  const { sendJson, getStripe } = deps;
+  const { sendJson, getStripe, getStore, setStore } = deps;
+  const crypto = require('crypto'), BONUS_SIP = 100, A = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789';
+  const code6 = () => { let x = ''; for (let i = 0; i < 6; i++) x += A[crypto.randomInt(A.length)]; return x; };
+  let chain = Promise.resolve(); const serial = (fn) => { const p = chain.then(fn, fn); chain = p.catch(() => { }); return p; };
   const ITEMS = { shirt: { label: 'T-shirt', cents: 2500 }, sticker: { label: 'Sticker', cents: 500 } };   // base prices: change them here
   const LETTER_CENTS = 500, MAX_LETTERS = 12, STICKER_ADDON_CENTS = 300;   // a shirt buyer can add the matching sticker for $3 (it is $5 alone)
   const BASES = [['cubby_shirt', 'Cubby Explosion shirt', 'shirt'], ['explox_shirt_1_character', 'Explox character shirt', 'shirt'], ['explox_shirt_2_vehicle', 'Explox vehicle shirt', 'shirt'], ['exgun_shirt_1_tank', 'EXGUN tank shirt', 'shirt'], ['sip_shirt_logo', 'S.I.P. logo shirt', 'shirt'], ['rich_shirt', 'RICH shirt', 'shirt'], ['death_shirt', 'DEATH shirt', 'shirt'],
@@ -37,6 +40,21 @@ module.exports = function createMerch(deps) {
     if (route === 'config' && method === 'GET') {
       return sendJson(res, { ok: true, enabled: !!st, test: String(process.env.EXWORLD_STRIPE_KEY || process.env.STRIPE_SECRET_KEY || '').startsWith('sk_test_'), letterCents: LETTER_CENTS, maxLetters: MAX_LETTERS, sizes: SIZES, items: ITEMS, designs: Object.keys(DESIGNS).map((k) => ({ id: k, label: DESIGNS[k][0], type: DESIGNS[k][1] })) }), true;
     }
+    if (route === 'bonus' && method === 'POST') {   // every paid merch order gets ONE free 100 S.I.P. code (use it in Explox through the same redeem box as the ad codes)
+      if (!st || !getStore) return sendJson(res, { ok: false, error: 'The shop is not open yet.' }, 503), true;
+      const b = await readJson(req, 2048) || {}, sid = String(b.session || '').slice(0, 200);
+      if (!/^cs_[A-Za-z0-9_]+$/.test(sid)) return sendJson(res, { ok: false, error: 'bad request' }, 400), true;
+      let session; try { session = await st.checkout.sessions.retrieve(sid); } catch (e) { return sendJson(res, { ok: false, error: 'Could not find that order.' }, 404), true; }
+      if (session.payment_status !== 'paid' || !session.metadata || session.metadata.merch !== '1') return sendJson(res, { ok: false, error: 'That order is not paid yet.' }, 402), true;
+      const out = await serial(async () => {
+        const made = (await getStore('exworld_merchbonus', {})) || {}, codes = (await getStore('exworld_sipcodes', {})) || {};
+        if (made[sid]) return { ok: true, code: made[sid], sip: BONUS_SIP, used: !!(codes[made[sid]] && codes[made[sid]].used) };
+        const code = 'SIP-' + code6() + '-' + code6(); codes[code] = { sip: BONUS_SIP, used: false, made: Date.now(), from: 'merch' }; made[sid] = code;
+        await setStore('exworld_sipcodes', codes); await setStore('exworld_merchbonus', made);
+        return { ok: true, code, sip: BONUS_SIP, used: false };
+      });
+      return sendJson(res, out), true;
+    }
     if (route === 'checkout' && method === 'POST') {
       if (!st) return sendJson(res, { ok: false, error: 'The merch shop is not open yet.' }, 503), true;
       const b = await readJson(req, 4096) || {}, design = String(b.design || '');
@@ -52,7 +70,7 @@ module.exports = function createMerch(deps) {
           line_items: [{ price_data: { currency: 'usd', product_data: { name: title }, unit_amount: cents }, quantity: 1 }],
           shipping_address_collection: { allowed_countries: ['US', 'CA', 'GB', 'AU'] },
           metadata: { merch: '1', design, name: nm.name, size, letters: String(letters(nm.name)), sticker: addSt ? 'yes' : 'no' },
-          success_url: base + '?paid=1', cancel_url: base + '?cancel=1',
+          success_url: base + '?paid=1&ms={CHECKOUT_SESSION_ID}', cancel_url: base + '?cancel=1',
         });
         return sendJson(res, { ok: true, url: session.url, cents }), true;
       } catch (e) { console.error('merch checkout error:', e.message); return sendJson(res, { ok: false, error: 'Could not start the payment: ' + String(e.message || '').slice(0, 160) }, 500), true; }

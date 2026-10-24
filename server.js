@@ -502,7 +502,7 @@ const exworldSip = require('./exworld-sip')({ sendJson, ...exworldStore,
   userByName: async (name) => { const n = String(name || '').trim(); if (!n) return null; const d = await usersCol.findOne({ _id: n }, { projection: { _id: 1 }, collation: { locale: 'en', strength: 2 } }); return d ? d._id : null; },
   grant: (name, sip) => applyOneTimeGrant(name, { sip }) });
 // Merch orders with a name printed on them, $5 per letter (see exworld-merch.js)
-const exworldMerch = require('./exworld-merch')({ sendJson, getStripe: () => exworldStripeOwn || stripe });
+const exworldMerch = require('./exworld-merch')({ sendJson, getStripe: () => exworldStripeOwn || stripe, ...exworldStore });
 const exworldMp = require('./exworld-mp')({ sendJson, refreshPass: (e) => exworldPay.refreshPass(e), ...exworldStore });
 
 const server = http.createServer(async (req, res) => {
