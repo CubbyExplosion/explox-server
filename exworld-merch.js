@@ -5,7 +5,7 @@
 module.exports = function createMerch(deps) {
   const { sendJson, getStripe } = deps;
   const ITEMS = { shirt: { label: 'T-shirt', cents: 2500 }, sticker: { label: 'Sticker', cents: 500 } };   // base prices: change them here
-  const LETTER_CENTS = 500, MAX_LETTERS = 12;
+  const LETTER_CENTS = 500, MAX_LETTERS = 12, STICKER_ADDON_CENTS = 300;   // a shirt buyer can add the matching sticker for $3 (it is $5 alone)
   const BASES = [['cubby_shirt', 'Cubby Explosion shirt', 'shirt'], ['explox_shirt_1_character', 'Explox character shirt', 'shirt'], ['explox_shirt_2_vehicle', 'Explox vehicle shirt', 'shirt'], ['exgun_shirt_1_tank', 'EXGUN tank shirt', 'shirt'], ['sip_shirt_logo', 'S.I.P. logo shirt', 'shirt'], ['rich_shirt', 'RICH shirt', 'shirt'], ['death_shirt', 'DEATH shirt', 'shirt'],
     ['cubby_sticker', 'Cubby Explosion sticker', 'sticker'], ['rich_sticker', 'RICH sticker', 'sticker'], ['death_sticker', 'DEATH sticker', 'sticker'], ['explox_sticker_1_character', 'Explox character sticker', 'sticker'], ['explox_sticker_2_vehicle', 'Explox vehicle sticker', 'sticker'], ['exgun_sticker_1_tank', 'EXGUN tank sticker', 'sticker'], ['sip_sticker_logo', 'S.I.P. logo sticker', 'sticker']];
   const DESIGNS = {};   // every design comes in a dark and a light version
@@ -45,13 +45,13 @@ module.exports = function createMerch(deps) {
       const type = DESIGNS[design][1], size = type === 'shirt' ? (SIZES.includes(String(b.size)) ? String(b.size) : null) : 'n/a';
       if (!size) return sendJson(res, { ok: false, error: 'Pick a size.' }, 400), true;
       let base; try { const u = new URL(String(b.returnUrl || '')); if (u.protocol !== 'https:' && u.protocol !== 'http:') throw new Error('x'); base = u.origin + u.pathname; } catch (e) { return sendJson(res, { ok: false, error: 'bad return address' }, 400), true; }
-      const cents = price(design, nm.name), title = DESIGNS[design][0] + (nm.name ? ' with the name ' + nm.name : '');
+      const addSt = type === 'shirt' && b.addSticker === true, cents = price(design, nm.name) + (addSt ? STICKER_ADDON_CENTS : 0), title = DESIGNS[design][0] + (nm.name ? ' with the name ' + nm.name : '') + (addSt ? ' + matching sticker' : '');
       try {
         const session = await st.checkout.sessions.create({
           mode: 'payment', payment_method_types: ['card'], managed_payments: { enabled: false },
           line_items: [{ price_data: { currency: 'usd', product_data: { name: title }, unit_amount: cents }, quantity: 1 }],
           shipping_address_collection: { allowed_countries: ['US', 'CA', 'GB', 'AU'] },
-          metadata: { merch: '1', design, name: nm.name, size, letters: String(letters(nm.name)) },
+          metadata: { merch: '1', design, name: nm.name, size, letters: String(letters(nm.name)), sticker: addSt ? 'yes' : 'no' },
           success_url: base + '?paid=1', cancel_url: base + '?cancel=1',
         });
         return sendJson(res, { ok: true, url: session.url, cents }), true;
