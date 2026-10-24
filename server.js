@@ -503,6 +503,8 @@ const exworldSip = require('./exworld-sip')({ sendJson, ...exworldStore,
   grant: (name, sip) => applyOneTimeGrant(name, { sip }) });
 // Merch orders with a name printed on them, $5 per letter (see exworld-merch.js)
 const exworldMerch = require('./exworld-merch')({ sendJson, getStripe: () => exworldStripeOwn || stripe, ...exworldStore });
+// Print Lab chat helper (stays off until a parent sets PRINTLAB_AI_ON and PRINTLAB_AI_KEY on the host; see printlab-ai.js)
+const printlabAi = require('./printlab-ai')({ sendJson });
 const exworldMp = require('./exworld-mp')({ sendJson, refreshPass: (e) => exworldPay.refreshPass(e), ...exworldStore });
 
 const server = http.createServer(async (req, res) => {
@@ -517,6 +519,7 @@ const server = http.createServer(async (req, res) => {
     if (await exworldMp(req, res, p, method, q)) return;   // Exworld multiplayer rooms (see exworld-mp.js)
     if (await exworldPay(req, res, p, method, q)) return;   // Exworld shop (see exworld-pay.js)
     if (await exworldSip(req, res, p, method, q)) return;   // Exworld ad reward codes (see exworld-sip.js)
+    if (await printlabAi(req, res, p, method)) return;   // Print Lab chat helper (see printlab-ai.js)
     if (await exworldMerch(req, res, p, method, q)) return;   // merch orders (see exworld-merch.js)
 
     if (p === '/api/health' && method === 'GET') return sendJson(res, { ok: true });
